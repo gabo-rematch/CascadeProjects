@@ -1,177 +1,9 @@
-import React, { useState, useEffect } from 'react';
-import { fetchTableData } from '../supabaseClient';
-
-// Helper to safely get unique values, handling arrays within arrays for multi-selects
-const getUniqueValues = (data, key) => {
-  const values = data.flatMap(row => row[key]);
-  // If the values are arrays themselves (like amenities), flatten again
-  const flattened = values.flat(); 
-  return [...new Set(flattened)].filter(Boolean).sort(); // Filter out falsy values and sort
-};
-
-// Helper to parse range strings or numbers
-const parseRangeValue = (val) => {
-  if (typeof val === 'number') return [val, val];
-  if (typeof val !== 'string' || !val) return [null, null];
-  const cleanedVal = val.replace(/,/g, ''); // Remove commas
-  const match = cleanedVal.match(/^([\d.]+)\s*[-/]?\s*([\d.]+)?$/);
-  if (match) {
-    const min = parseFloat(match[1]);
-    const max = match[2] ? parseFloat(match[2]) : min; // If no second number, min is max
-    return [isNaN(min) ? null : min, isNaN(max) ? null : max];
-  } 
-  const singleNum = parseFloat(cleanedVal);
-  return [isNaN(singleNum) ? null : singleNum, isNaN(singleNum) ? null : singleNum];
-};
-
-// Mapping function from Supabase row to UI row
-function mapSupabaseRow(row) {
-  let amenities = [];
-  if (typeof row.facilities === 'string' && row.facilities.trim() !== '') {
-    amenities = row.facilities.split(',').map(s => s.trim()).filter(Boolean);
-  } else if (Array.isArray(row.facilities)) {
-    amenities = row.facilities.filter(Boolean);
-  }
-
-  let pictures = [];
-  const rawImages = row.images;
-
-  if (Array.isArray(rawImages)) {
-    // If it's already an array, just filter out empty/null values
-    pictures = rawImages.filter(Boolean);
-  } else if (typeof rawImages === 'string' && rawImages.trim() !== '') {
-    // If it's a non-empty string, try parsing
-    try {
-      const parsed = JSON.parse(rawImages);
-      if (Array.isArray(parsed)) {
-        // Successfully parsed a JSON array
-        pictures = parsed.filter(Boolean);
-      } else {
-        // Parsed something, but not an array (unexpected, treat as single URL?)
-        // Or fallback to splitting by comma
-        console.warn(`Parsed non-array from images string for PK ${row.pk}:`, parsed);
-        // Fallback: attempt splitting by comma just in case
-        pictures = rawImages.split(',').map(s => s.trim()).filter(Boolean);
-      }
-    } catch (e) {
-      // JSON parsing failed, assume comma-separated or single URL
-      pictures = rawImages.split(',').map(s => s.trim()).filter(Boolean);
-    }
-  }
-  // If rawImages is null, undefined, empty string, or not an array/string, pictures remains []
-
-  let neighborhood = [];
-  if (typeof row.community === 'string' && row.community.trim() !== '') {
-    neighborhood = row.community.split(',').map(s => s.trim()).filter(Boolean);
-  } else if (Array.isArray(row.community)) {
-    neighborhood = row.community.filter(Boolean);
-  }
-
-  let daysOnMarket = null;
-  if (row.created_date) {
-    try {
-      const created = new Date(row.created_date);
-      const now = new Date();
-      daysOnMarket = Math.floor((now - created) / (1000 * 60 * 60 * 24));
-    } catch { /* Ignore invalid date */ }
-  }
-
-  const listingRef = row.listing_ref_no || row.property_ref_no || '';
-  const location = (row.latitude && row.longitude) ? { latitude: row.latitude, longitude: row.longitude } : null;
-
-  return {
-    id: row.pk,
-    transactionType: row.transaction_type,
-    price: row.price_aed,
-    unitSize: row.area_sqft,
-    neighborhood,
-    address: row.location_raw,
-    building: row.building_name || '', // Assuming building_name exists
-    bedrooms: row.bedr_number,
-    bathrooms: row.bathr_number,
-    unitType: row.property_type,
-    listingTitle: row.listing_title,
-    listingRef,
-    furnishing: row.furnishing,
-    amenities,
-    availableFrom: row.available_from,
-    pictures, // Keep original images array for carousel
-    daysOnMarket,
-    location, // Separate location object
-    originalPayload: row, // Keep the original row for the modal
-  };
-}
-
-// Image Carousel Component
-function PictureCarousel({ pictures }) {
-  const [index, setIndex] = React.useState(0);
-
-  if (!pictures || pictures.length === 0) return null;
-
-  const safePictures = pictures.filter(p => typeof p === 'string'); // Ensure only strings are used
-  if (safePictures.length === 0) return null;
-
-  const currentSrc = safePictures[index];
-
-  const prev = (e) => { e.stopPropagation(); setIndex(i => (i === 0 ? safePictures.length - 1 : i - 1)); };
-  const next = (e) => { e.stopPropagation(); setIndex(i => (i === safePictures.length - 1 ? 0 : i + 1)); };
-
-  return (
-    <div className="flex items-center justify-center gap-1 w-28"> {/* Fixed width container */}
-      {safePictures.length > 1 && (
-        <button onClick={prev} className="px-1 text-lg text-gray-500 hover:text-gray-800">‹</button>
-      )}
-      <img
-        src={currentSrc} // Use the logged variable
-        alt={`Listing ${index + 1}`}
-        className="h-12 w-20 object-cover rounded border border-gray-300" // Adjusted size
-      />
-      {safePictures.length > 1 && (
-        <button onClick={next} className="px-1 text-lg text-gray-500 hover:text-gray-800">›</button>
-      )}
-    </div>
-  );
-}
-
-// Define this component above ListingsTable
-function ExpandableListCell({ items, label, itemClassName, limit = 3, onOpenModal }) {
-  // Ensure items is a valid array and filter out non-strings/empty strings
-  const validItems = Array.isArray(items)
-    ? items.filter(item => typeof item === 'string' && item.trim() !== '')
-    : [];
-
-  if (validItems.length === 0) {
-    return null; // Return nothing if no valid items
-  }
-
-  const displayItems = validItems.slice(0, limit);
-  const hasMore = validItems.length > limit;
-
-  const handleViewMoreClick = (e) => {
-    e.stopPropagation(); // Prevent triggering row clicks etc.
-    onOpenModal(label, validItems); // Pass the label and the full list of valid items
-  };
-
-  return (
-    <div className='flex flex-wrap items-center gap-1'>
-      {displayItems.map((item, index) => (
-        // Using index in key as items might not be unique
-        <span key={`${label}-item-${index}`} className={itemClassName}>
-          {item}
-        </span>
-      ))}
-      {hasMore && (
-        <button
-          onClick={handleViewMoreClick}
-          className="text-blue-600 hover:text-blue-800 text-xs underline pl-1"
-          aria-label={`View all ${label}`}
-        >
-          View More ({validItems.length - limit})
-        </button>
-      )}
-    </div>
-  );
-}
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { fetchTableData } from '../supabaseClient'; // Assuming this exists for fetching
+import { getUniqueValues, parseRangeValue, mapSupabaseRow } from '../utils/tableUtils'; // Import helpers
+import PictureCarousel from './PictureCarousel'; // Import the extracted component
+import ListingDetailModal from './ListingDetailModal'; // Import the extracted modal
+import ExpandableListCell from './ExpandableListCell'; // Import the extracted cell component
 
 // Main Table Component
 export default function ListingsTable() {
@@ -480,8 +312,8 @@ export default function ListingsTable() {
                 </td>
               </tr>
             )}
-            {filteredData.map((row) => (
-              <tr key={row.id} className="even:bg-gray-50 hover:bg-gray-100 transition-colors border-t border-gray-200">
+            {filteredData.map((row, rowIndex) => (
+              <tr key={row.id ?? `row-${rowIndex}`} className="even:bg-gray-50 hover:bg-gray-100 transition-colors border-t border-gray-200">
                 {/* Picture Cell First */}
                 <td className="px-3 py-2 whitespace-nowrap align-middle">
                   <PictureCarousel pictures={row.pictures} />
@@ -558,27 +390,7 @@ export default function ListingsTable() {
 
       {/* Payload Modal Implementation (Basic Example) */}
       {isPayloadModalOpen && selectedPayload && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[80vh]">
-            <div className="flex justify-between items-center p-4 border-b">
-              <h2 className="text-lg font-semibold">Raw Listing Data</h2>
-              <button onClick={handleClosePayloadModal} className="text-gray-500 hover:text-gray-800 text-2xl">&times;</button>
-            </div>
-            <div className="p-4 overflow-y-auto max-h-[calc(80vh-100px)]"> {/* Adjust max-h based on header/footer */}
-              <pre className="text-xs bg-gray-100 p-3 rounded overflow-x-auto">
-                {JSON.stringify(selectedPayload, null, 2)}
-              </pre>
-            </div>
-             <div className="flex justify-end p-3 border-t">
-                 <button 
-                    onClick={handleClosePayloadModal} 
-                    className="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300 text-sm"
-                 >
-                     Close
-                 </button>
-            </div>
-          </div>
-        </div>
+        <ListingDetailModal listing={selectedPayload} onClose={handleClosePayloadModal} />
       )}
 
       {/* List Modal Implementation */}

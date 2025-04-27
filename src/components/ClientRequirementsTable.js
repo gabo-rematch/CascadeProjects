@@ -314,22 +314,22 @@ export default function ClientRequirementsTable() {
             </tr>
           </thead>
           <tbody>
-            {filtered.map((row) => (
-              <tr key={row.id}>
+            {filtered.map((row, rowIndex) => (
+              <tr key={row.id ?? `row-${rowIndex}`}> 
                 {columns.map((col) => (
                   <td key={col.key} className="px-4 py-2 whitespace-nowrap text-xs align-top">
                     {/* Specific rendering for neighborhood pills */}
                     {col.key === "neighborhood" && Array.isArray(row[col.key]) ? (
-                      (row[col.key] ?? []).map((n) => (
-                        <span key={n} className="bg-accent text-accent-foreground px-2 py-1 rounded text-xs mr-1 inline-block mb-1">
+                      (row[col.key] ?? []).map((n, index) => ( 
+                        <span key={`${col.key}-item-${index}`} className="bg-accent text-accent-foreground px-2 py-1 rounded text-xs mr-1 inline-block mb-1"> 
                           {n}
                         </span>
                       ))
                     ) 
                     /* Specific rendering for amenities pills */
                     : col.key === "amenities" && Array.isArray(row[col.key]) ? (
-                      (row[col.key] ?? []).map((a) => (
-                         <span key={a} className="bg-secondary text-secondary-foreground px-2 py-1 rounded text-xs mr-1 inline-block mb-1">
+                      (row[col.key] ?? []).map((a, index) => ( 
+                         <span key={`${col.key}-item-${index}`} className="bg-secondary text-secondary-foreground px-2 py-1 rounded text-xs mr-1 inline-block mb-1"> 
                           {a}
                         </span>
                       ))

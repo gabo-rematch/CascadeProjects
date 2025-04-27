@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { getSupabaseClient, fetchTableData } from '../supabaseClient'; // Ensure this path is correct
+// No longer need getSupabaseClient here if all logic is in hooks
 import CardSection from './CardSection'; // Import the extracted component
+import { usePropertyData, useMatchCounts, useMatches } from '../hooks/useMatchingData'; // Import custom hooks
 
 // Descriptions for different matching algorithms
 const ALGORITHM_DESCRIPTIONS = {
@@ -28,231 +29,97 @@ const ALGORITHM_DESCRIPTIONS = {
   // Add more algorithms here if needed
 };
 
-// --- Main MatchingPage Component ---
+// --- MatchingPage Component ---
 const MatchingPage = () => {
-  // --- State --- 
-  const [listingsData, setListingsData] = useState([]);
-  const [requirementsData, setRequirementsData] = useState([]);
-  const [selectedListingId, setSelectedListingId] = useState('');
-  const [selectedRequirementId, setSelectedRequirementId] = useState('');
-  const [displayedMatches, setDisplayedMatches] = useState([]); // State for matches of the selected item
-  const [loading, setLoading] = useState(false); // Combined loading state for initial fetch and match fetch
-  const [error, setError] = useState(null);
+  // State managed directly within MatchingPage
+  const [selectedListingId, setSelectedListingId] = useState(''); // Initialize with empty string
+  const [selectedRequirementId, setSelectedRequirementId] = useState(''); // Initialize with empty string
+  const [transactionTypeFilter, setTransactionTypeFilter] = useState('all'); // 'all', 'sale', 'rent'
   const [selectedAlgorithm, setSelectedAlgorithm] = useState('v1'); // State for algorithm
-  const [transactionTypeFilter, setTransactionTypeFilter] = useState('All'); // 'All', 'Sale', 'Rent'
-  const [listingMatchCounts, setListingMatchCounts] = useState({}); // New state for listing counts { pk: count }
-  const [requirementMatchCounts, setRequirementMatchCounts] = useState({}); // New state for requirement counts { pk: count }
-  const [countsLoading, setCountsLoading] = useState(false); // New state for counts loading
 
-  // --- Constants --- 
-  const LISTINGS_TABLE = 'wa_group_listings'; 
-  const REQUIREMENTS_TABLE = 'wa_group_client_reqs'; // Define constant
+  // Use the custom hook for listings and requirements
+  const {
+    listings,
+    requirements,
+    isLoadingListings,
+    isLoadingRequirements,
+    errorListings,
+    errorRequirements
+  } = usePropertyData(transactionTypeFilter);
+
+  // Use the custom hook for match counts
+  const {
+    listingMatchCounts,
+    requirementMatchCounts,
+    isLoadingMatchCounts,
+    errorMatchCounts
+  } = useMatchCounts(selectedAlgorithm, transactionTypeFilter);
+
+  // Use the custom hook for matches
+  const {
+    matches,
+    isLoadingMatches,
+    errorMatches,
+    fetchMatches, // Function to trigger match fetching
+    clearMatches  // Function to clear matches state
+  } = useMatches(selectedAlgorithm, transactionTypeFilter);
 
   // --- Effects --- 
 
-  // Fetch initial data
+  // Effect for fetching matches when selection changes
   useEffect(() => {
-    setLoading(true);
-    let isMounted = true; 
-    const fetchData = async () => {
-      try {
-        const [listingsResponse, requirementsResponse] = await Promise.all([
-          fetchTableData(LISTINGS_TABLE),
-          fetchTableData(REQUIREMENTS_TABLE)
-        ]);
-        if (isMounted) {
-            setListingsData(listingsResponse || []);
-            setRequirementsData(requirementsResponse || []);
-            setError(null);
-        }
-      } catch (error) {
-        console.error("Error fetching data:", error);
-        if (isMounted) {
-            setError(error.message);
-            setListingsData([]);
-            setRequirementsData([]);
-        }
-      } finally {
-        if (isMounted) setLoading(false);
-      }
-    };
-    fetchData();
-    return () => { isMounted = false; }; // Cleanup on unmount
-  }, []); // Run only once on mount
+    let sourceId = null;
+    let sourceType = null;
 
-  // Fetch match counts
-  useEffect(() => {
-    const fetchCounts = async () => {
-      if (!getSupabaseClient()) return;
-      setCountsLoading(true);
-      try {
-        const [listingCountsRes, requirementCountsRes] = await Promise.all([
-          getSupabaseClient().rpc('get_match_counts', {
-            p_source_type: 'listing',
-            p_match_algorithm: selectedAlgorithm,
-            p_transaction_filter: transactionTypeFilter
-          }),
-          getSupabaseClient().rpc('get_match_counts', {
-            p_source_type: 'requirement',
-            p_match_algorithm: selectedAlgorithm,
-            p_transaction_filter: transactionTypeFilter
-          })
-        ]);
+    if (selectedListingId) {
+      sourceId = selectedListingId;
+      sourceType = 'listing';
+    } else if (selectedRequirementId) {
+      sourceId = selectedRequirementId;
+      sourceType = 'requirement';
+    }
 
-        if (listingCountsRes.error) throw listingCountsRes.error;
-        if (requirementCountsRes.error) throw requirementCountsRes.error;
-
-        // Convert arrays to maps for easy lookup
-        const listingCountsMap = (listingCountsRes.data || []).reduce((acc, item) => {
-          acc[item.source_pk] = item.match_count;
-          return acc;
-        }, {});
-        const requirementCountsMap = (requirementCountsRes.data || []).reduce((acc, item) => {
-          acc[item.source_pk] = item.match_count;
-          return acc;
-        }, {});
-
-        setListingMatchCounts(listingCountsMap);
-        setRequirementMatchCounts(requirementCountsMap);
-
-      } catch (err) {
-        console.error("Error fetching match counts:", err);
-        // Optionally set an error state for counts
-      } finally {
-        setCountsLoading(false);
-      }
-    };
-
-    fetchCounts();
-  }, [selectedAlgorithm, transactionTypeFilter]); // Re-fetch when algorithm or filter changes
-
-  // Filter dropdown options based on transaction type
-  const filteredListings = useMemo(() => {
-    if (transactionTypeFilter === 'All') return listingsData; // Use original data
-    return listingsData.filter(listing => 
-        listing.transaction_type?.toLowerCase() === transactionTypeFilter.toLowerCase()
-    );
-  }, [listingsData, transactionTypeFilter]);
-
-  const filteredRequirements = useMemo(() => {
-    if (transactionTypeFilter === 'All') return requirementsData; // Use original data
-    return requirementsData.filter(req => 
-        req.transaction_type?.toLowerCase() === transactionTypeFilter.toLowerCase()
-    );
-  }, [requirementsData, transactionTypeFilter]);
-
-  // Find the currently selected full listing/requirement object from the initially fetched data
-  const selectedListing = useMemo(() => {
-    if (!selectedListingId) return null;
-    // Find from original listingsData, not calculatedListings
-    return listingsData.find(l => l.pk === parseInt(selectedListingId));
-  }, [selectedListingId, listingsData]);
-
-  const selectedRequirement = useMemo(() => {
-    if (!selectedRequirementId) return null;
-    // Find from original requirementsData, not calculatedRequirements
-    return requirementsData.find(req => req.pk === parseInt(selectedRequirementId));
-  }, [selectedRequirementId, requirementsData]);
-
-
-  // --- Handlers --- 
-  const handleListingSelect = async (event) => {
-    const pk = event.target.value;
-    setSelectedListingId(pk);
-    setSelectedRequirementId(''); // Clear requirement selection
-    setDisplayedMatches([]); // Clear previous matches
-    setError(null); // Clear previous errors
-
-    if (pk) {
-      setLoading(true); // Start loading matches
-      try {
-        console.log(`Fetching matches for listing PK: ${pk}, Algorithm: ${selectedAlgorithm}, Filter: ${transactionTypeFilter}`);
-        const supabase = getSupabaseClient(); // Get client instance
-        const { data: matchesData, error: rpcError } = await supabase.rpc('get_matches', {
-          p_source_pk: parseInt(pk),
-          p_source_type: 'listing',
-          p_match_algorithm: selectedAlgorithm,
-          p_transaction_filter: transactionTypeFilter
-        });
-
-        if (rpcError) {
-          throw rpcError;
-        }
-
-        console.log("Found Matching Requirements:", matchesData); // Debugging
-        setDisplayedMatches(matchesData || []); // Update state with matches
-      } catch (err) {
-        console.error("Error fetching matching requirements:", err);
-        setError(err.message || 'Failed to fetch matching requirements');
-        setDisplayedMatches([]); // Clear matches on error
-      } finally {
-        setLoading(false); // Stop loading matches
-      }
+    if (sourceId && sourceType) {
+      fetchMatches(sourceId, sourceType);
     } else {
-      // No PK selected, clear everything
-      setDisplayedMatches([]); 
-      setError(null);
+      clearMatches(); // Clear matches if nothing is selected
+    }
+    // Depend on the selected IDs and the fetch/clear functions from the hook
+  }, [selectedListingId, selectedRequirementId, fetchMatches, clearMatches]);
+
+  // --- Event Handlers --- 
+
+  const handleSelect = (type, id) => {
+    const selectValue = id || ''; // Use empty string if id is null/undefined/empty
+
+    if (type === 'listing') {
+      setSelectedListingId(selectValue);
+      setSelectedRequirementId(''); // Clear the other selection
+    } else if (type === 'requirement') {
+      setSelectedRequirementId(selectValue);
+      setSelectedListingId(''); // Clear the other selection
     }
   };
 
-  const handleRequirementSelect = async (event) => {
-    const pk = event.target.value;
-    setSelectedRequirementId(pk);
-    setSelectedListingId(''); // Clear listing selection
-    setDisplayedMatches([]); // Clear previous matches
-    setError(null); // Clear previous errors
+  // --- Memoized Values --- 
 
-    if (pk) {
-      setLoading(true); // Start loading matches
-       try {
-        console.log(`Fetching matches for requirement PK: ${pk}, Algorithm: ${selectedAlgorithm}, Filter: ${transactionTypeFilter}`);
-        const supabase = getSupabaseClient(); // Get client instance
-        const { data: matchesData, error: rpcError } = await supabase.rpc('get_matches', {
-          p_source_pk: parseInt(pk),
-          p_source_type: 'requirement',
-          p_match_algorithm: selectedAlgorithm,
-          p_transaction_filter: transactionTypeFilter
-        });
+  // Convert IDs to numbers for finding in arrays, handle empty string case
+  const numericListingId = selectedListingId ? parseInt(selectedListingId) : null;
+  const numericRequirementId = selectedRequirementId ? parseInt(selectedRequirementId) : null;
 
-        if (rpcError) {
-          throw rpcError;
-        }
-        console.log("Found Matching Listings:", matchesData); // Debugging
-        setDisplayedMatches(matchesData || []); // Update state with matches
-      } catch (err) {
-        console.error("Error fetching matching listings:", err);
-        setError(err.message || 'Failed to fetch matching listings');
-        setDisplayedMatches([]); // Clear matches on error
-      } finally {
-        setLoading(false); // Stop loading matches
-      }
-    } else {
-        // No PK selected, clear everything
-        setDisplayedMatches([]); 
-        setError(null);
-    }
-  };
+  const selectedListing = useMemo(() => listings.find(l => l.pk === numericListingId), [listings, numericListingId]);
+  const selectedRequirement = useMemo(() => requirements.find(r => r.pk === numericRequirementId), [requirements, numericRequirementId]);
 
-  // Restore handler for Transaction Type Filter
-  const handleTransactionTypeFilterChange = (e) => {
-    setTransactionTypeFilter(e.target.value);
-    // Clear selections when filter changes
-    setSelectedListingId(''); 
-    setSelectedRequirementId('');
-    setDisplayedMatches([]);
-  };
+  // Use matches state from the hook directly
+  const displayedMatches = matches;
 
-  const handleAlgorithmChange = (event) => {
-    setSelectedAlgorithm(event.target.value);
-    // Clear selections and displayed matches when algorithm changes
-    setSelectedListingId(''); 
-    setSelectedRequirementId('');
-    setDisplayedMatches([]);
-  };
+  // Combine loading states
+  const isLoading = isLoadingListings || isLoadingRequirements || isLoadingMatchCounts || isLoadingMatches;
+  const combinedError = errorListings || errorRequirements || errorMatches || errorMatchCounts; // Combine all potential errors
 
-  // --- UI Rendering --- 
-  if (loading) return <div className="p-4">Loading data...</div>; // Combined loading state
-  if (error) return <div className="p-4 text-red-600">Error: {error}</div>;
+  // --- Render Logic --- 
+
+  if (combinedError) return <div className="p-4 text-red-600">Error: {combinedError}</div>;
 
   return (
     <div className="container mx-auto p-4 space-y-6">
@@ -267,12 +134,12 @@ const MatchingPage = () => {
             id="transactionTypeFilter"
             name="transactionTypeFilter"
             value={transactionTypeFilter}
-            onChange={handleTransactionTypeFilterChange}
+            onChange={(e) => setTransactionTypeFilter(e.target.value)}
             className="block w-full p-2 text-sm text-gray-700 rounded-lg border border-gray-300 focus:ring-blue-500 focus:border-blue-500"
           >
-            <option value="All">All</option>
-            <option value="Sale">Sale</option>
-            <option value="Rent">Rent</option>
+            <option value="all">All</option>
+            <option value="sale">Sale</option>
+            <option value="rent">Rent</option>
           </select>
         </div>
 
@@ -281,10 +148,10 @@ const MatchingPage = () => {
           <label htmlFor="algorithmSelector" className="block text-sm font-medium text-gray-700 mb-1">Matching Algorithm:</label>
           <select
             id="algorithmSelector"
-            name="algorithmSelector"
             value={selectedAlgorithm}
-            onChange={handleAlgorithmChange}
-            className="block w-full p-2 text-sm text-gray-700 rounded-lg border border-gray-300 focus:ring-blue-500 focus:border-blue-500"
+            onChange={(e) => setSelectedAlgorithm(e.target.value)}
+            className="block w-full p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+            disabled={isLoading} // Disable while initial data or matches are loading
           >
             {Object.keys(ALGORITHM_DESCRIPTIONS).map(algoKey => (
               <option key={algoKey} value={algoKey}>
@@ -296,8 +163,8 @@ const MatchingPage = () => {
 
         {/* Loading/Error Indicator for Match Fetching */} 
         <div className="flex items-end justify-end">
-          {loading && (selectedListingId || selectedRequirementId) && <p className="text-sm text-blue-600">Loading matches...</p>}
-          {error && <p className="text-sm text-red-600">Error: {error}</p>}
+          {isLoading && (selectedListingId || selectedRequirementId) && <p className="text-sm text-blue-600">Loading matches...</p>}
+          {combinedError && <p className="text-sm text-red-600">Error: {combinedError}</p>}
         </div>
       </div>
 
@@ -318,17 +185,17 @@ const MatchingPage = () => {
         {/* Listing Selector */} 
         <div>
           <label className="font-medium block mb-1">Select Listing:</label>
-          <select value={selectedListingId} onChange={handleListingSelect} className="block w-full p-2 text-sm text-gray-700 rounded-lg border border-gray-300 focus:ring-blue-500 focus:border-blue-500">
+          <select value={selectedListingId} onChange={(e) => handleSelect('listing', e.target.value)} className="block w-full p-2 text-sm text-gray-700 rounded-lg border border-gray-300 focus:ring-blue-500 focus:border-blue-500">
             <option value="">-- Select Listing --</option>
-            {filteredListings.length === 0 ? (
+            {listings.length === 0 ? (
               <option value="" disabled>No listings match filter</option>
             ) : (
-              filteredListings.map(listing => {
+              listings.map(listing => {
                 const count = listingMatchCounts[listing.pk];
-                const countText = countsLoading ? '(Loading...)' : (count !== undefined ? `(${count})` : '');
+                const countText = isLoadingMatchCounts ? '(Loading...)' : (count !== undefined ? `(${count})` : '');
                 const label = `${listing.listing_title || `Ref: ${listing.property_ref_no || listing.pk}`} ${countText}`;
                 return (
-                  <option key={listing.pk} value={listing.pk} disabled={loading && selectedListingId === listing.pk.toString()}> 
+                  <option key={listing.pk} value={listing.pk} disabled={isLoading && selectedListingId === listing.pk.toString()}> 
                     {label}
                   </option>
                 );
@@ -340,17 +207,17 @@ const MatchingPage = () => {
         {/* Requirement Selector */} 
         <div>
           <label className="font-medium block mb-1">Select Requirement:</label>
-          <select value={selectedRequirementId} onChange={handleRequirementSelect} className="block w-full p-2 text-sm text-gray-700 rounded-lg border border-gray-300 focus:ring-blue-500 focus:border-blue-500">
+          <select value={selectedRequirementId} onChange={(e) => handleSelect('requirement', e.target.value)} className="block w-full p-2 text-sm text-gray-700 rounded-lg border border-gray-300 focus:ring-blue-500 focus:border-blue-500">
             <option value="">-- Select Requirement --</option>
-            {filteredRequirements.length === 0 ? (
+            {requirements.length === 0 ? (
               <option value="" disabled>No requirements match filter</option>
             ) : (
-              filteredRequirements.map(req => {
+              requirements.map(req => {
                 const count = requirementMatchCounts[req.pk];
-                const countText = countsLoading ? '(Loading...)' : (count !== undefined ? `(${count})` : '');
+                const countText = isLoadingMatchCounts ? '(Loading...)' : (count !== undefined ? `(${count})` : '');
                 const label = `${req.client_name || `ID: ${req.pk}`} ${countText}`;
                 return (
-                  <option key={req.pk} value={req.pk} disabled={loading && selectedRequirementId === req.pk.toString()}>
+                  <option key={req.pk} value={req.pk} disabled={isLoading && selectedRequirementId === req.pk.toString()}>
                     {label}
                   </option>
                 );
@@ -380,10 +247,10 @@ const MatchingPage = () => {
                 <h3 className="font-semibold text-lg mb-2">
                   Matches for Listing
                 </h3>
-                {loading ? (
+                {isLoadingMatches ? (
                   <p>Loading matches...</p>
-                ) : error ? (
-                  <p className="text-red-500">Error: {error}</p>
+                ) : errorMatches ? (
+                  <p className="text-red-500">Error loading matches: {errorMatches}</p>
                 ) : displayedMatches.length > 0 ? (
                   <div className="grid grid-cols-1 gap-4 max-h-[600px] overflow-y-auto pr-2"> 
                     {displayedMatches.map((match, index) => (
@@ -413,10 +280,10 @@ const MatchingPage = () => {
                 <h3 className="font-semibold text-lg mb-2">
                   Matches for Requirement
                 </h3>
-                {loading ? (
+                {isLoadingMatches ? (
                   <p>Loading matches...</p>
-                ) : error ? (
-                  <p className="text-red-500">Error: {error}</p>
+                ) : errorMatches ? (
+                  <p className="text-red-500">Error loading matches: {errorMatches}</p>
                 ) : displayedMatches.length > 0 ? (
                   <div className="grid grid-cols-1 gap-4 max-h-[600px] overflow-y-auto pr-2"> 
                     {displayedMatches.map((match, index) => (
