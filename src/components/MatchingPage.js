@@ -1,855 +1,438 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { fetchTableData } from '../supabaseClient';
+import { getSupabaseClient, fetchTableData } from '../supabaseClient'; // Ensure this path is correct
+import CardSection from './CardSection'; // Import the extracted component
 
-// Helper to safely convert to lowercase string or null
-const safeLowerCase = (str) => (str ? String(str).trim().toLowerCase() : null);
-
-// Helper to safely parse float or return null
-const safeParseFloat = (val) => {
-  const num = parseFloat(val);
-  return isNaN(num) ? null : num;
-}
-
-// Helper to safely parse integer or return null
-const safeParseInt = (val) => {
-  const num = parseInt(val, 10);
-  return isNaN(num) ? null : num;
+// Descriptions for different matching algorithms
+const ALGORITHM_DESCRIPTIONS = {
+  'v1': {
+    title: 'Exact Match (v1)',
+    criteria: [
+      "Transaction Type: Listing and Requirement must have the same type (Sale/Rent).",
+      "Bedrooms: Listing bedrooms must exactly match Requirement bedrooms.",
+      "Budget/Price: Listing price (AED) must fall within the Requirement's budget range (min/max AED).",
+      "Community: Listing community must be one of the communities specified in the Requirement.",
+      "Property Type: Listing unit type (e.g., apartment, townhouse) must match Requirement's unit type."
+    ]
+  },
+  'priority_v1': {
+    title: 'Priority Match (priority_v1)',
+    criteria: [
+      "Transaction Type: Must match.",
+      "Bedrooms: Exact match preferred, +/- 1 allowed.",
+      "Budget/Price: Listing price within budget range preferred, small variances allowed.",
+      "Community: Exact match preferred, nearby communities considered.",
+      "Property Type: Exact match preferred, similar types considered.",
+      "(Note: This is a sample description - actual logic may vary)"
+    ]
+  }
+  // Add more algorithms here if needed
 };
 
-// Helper to normalize community list
-const normalizeCommunityList = (communities) => {
-  if (!communities) return [];
-  if (Array.isArray(communities)) return communities.map(safeLowerCase).filter(Boolean);
-  if (typeof communities === 'string') return communities.split(',').map(safeLowerCase).filter(Boolean);
-  return [];
-}
-
-// --- Main Matching Logic (defined outside component) ---
-const findMatches = (sourceItem, sourceItemType, targetList, algorithmType = 'priority') => { // Added algorithmType param
-  console.log(`[findMatches] Start: source=${sourceItem?.pk}, type=${sourceItemType}, targetCount=${targetList?.length}, algo=${algorithmType}`);
-  if (!sourceItem || !targetList || !Array.isArray(targetList) || targetList.length === 0) {
-    console.warn('[findMatches] Invalid input: sourceItem or targetList missing/invalid.');
-    return [];
-  }
-
-  // --- Field Value Extraction --- 
-  const getReqValues = (req) => ({
-    id: req.pk,
-    priceMin: safeParseFloat(req.budget_min_aed),
-    priceMax: safeParseFloat(req.budget_max_aed),
-    size: safeParseFloat(req.area_sqft), 
-    communities: normalizeCommunityList(req.communities),
-    unitType: safeLowerCase(req.property_type),
-    transactionType: safeLowerCase(req.transaction_type),
-    bedrooms: safeParseInt(req.bedrooms),
-    rawCommunity: req.communities, // Keep raw value for NA checks
-    rawPrice: req.budget_min_aed || req.budget_max_aed // Check if any price is set
-  });
-
-  const getListValues = (listing) => ({
-    id: listing.pk,
-    price: safeParseFloat(listing.price_aed),
-    size: safeParseFloat(listing.area_sqft),
-    community: safeLowerCase(listing.community),
-    unitType: safeLowerCase(listing.property_type),
-    transactionType: safeLowerCase(listing.transaction_type),
-    bedrooms: safeParseInt(listing.bedrooms),
-    rawCommunity: listing.community // Keep raw value for NA checks
-  });
-  
-  // --- Filtering Logic based on Algorithm ---
-  try { // Add try...catch for safety during filtering
-    return targetList.filter(targetItem => {
-      let req, listing; // Declare vars for requirement and listing values
-      console.log(`[findMatches] Filtering target: ${targetItem?.pk}`);
-
-      if (sourceItemType === 'client') {
-        req = getReqValues(sourceItem);
-        listing = getListValues(targetItem);
-      } else { // sourceItemType === 'listing'
-        listing = getListValues(sourceItem); // Corrected: Was getReqValues
-        req = getReqValues(targetItem);     // Corrected: Was getListValues
-      }
-
-      console.log(`[findMatches] Comparing Req:`, req, `Listing:`, listing);
-
-      // --- Common Checks --- 
-      // 1. Transaction Type (Must always match)
-      if (!req.transactionType || !listing.transactionType || listing.transactionType !== req.transactionType) {
-        return false;
-      }
-
-      // --- Algorithm-Specific Checks --- 
-      if (algorithmType === 'exact') {
-        // 2. Unit Type (Must match if req specifies)
-        if (req.unitType && (!listing.unitType || listing.unitType !== req.unitType)) return false;
-        // 3. Community (Must match if req specifies non-NA)
-        if (req.rawCommunity && req.rawCommunity !== 'NA') { // Check if req specifies a real community
-          if (!listing.community || !req.communities.includes(listing.community)) return false;
-        } else { // If req community is NA, null, or empty, it's an incomplete requirement
-          return false; 
-        }
-        // 4. Price (Strict range + 5% max allowance, reject if req price is NA)
-        if (!req.rawPrice || req.rawPrice === 'NA') return false; // Reject if req price missing
-        if (listing.price === null) return false; // Reject if listing price missing
-        const maxAllowed = req.priceMax ? req.priceMax * 1.05 : null;
-        if (req.priceMin !== null && listing.price < req.priceMin) return false;
-        if (maxAllowed !== null && listing.price > maxAllowed) return false;
-        // 5. Unit Size (±30% allowed if req specifies)
-        if (req.size !== null) {
-          if (listing.size === null) return false;
-          const sizeLowerBound = req.size * 0.7;
-          const sizeUpperBound = req.size * 1.3;
-          if (listing.size < sizeLowerBound || listing.size > sizeUpperBound) return false;
-        }
-        // 6. Bedrooms (Must match exactly if req specifies)
-        if (req.bedrooms == null) {
-          // null/undefined means 'any', skip check
-        } else {
-          if (listing.bedrooms == null || listing.bedrooms !== req.bedrooms) return false;
-        }
-
-      } else if (algorithmType === 'priority') {
-        // 2. Unit Type (Must match if req specifies)
-        if (req.unitType && (!listing.unitType || listing.unitType !== req.unitType)) return false;
-        // 3. Community (Must match if req specifies non-NA; allow any if NA)
-        if (req.rawCommunity && req.rawCommunity !== 'NA') { 
-           if (!listing.community || !req.communities.includes(listing.community)) return false;
-        } // If NA or null, allow any community - no 'else return false'
-        // 4. Price (Range + 20% max allowance; allow any if req price is NA)
-        if (req.rawPrice && req.rawPrice !== 'NA') { // Only filter if req price is set
-           if (listing.price === null) return false;
-           const maxAllowed = req.priceMax ? req.priceMax * 1.20 : null;
-           if (req.priceMin !== null && listing.price < req.priceMin) return false;
-           if (maxAllowed !== null && listing.price > maxAllowed) return false;
-        } // Allow any listing price if req price is NA
-        // 5. Unit Size (±30% allowed if req specifies)
-        if (req.size !== null) {
-          if (listing.size === null) return false; 
-          const sizeLowerBound = req.size * 0.7;
-          const sizeUpperBound = req.size * 1.3;
-          if (listing.size < sizeLowerBound || listing.size > sizeUpperBound) return false;
-        }
-        // 6. Bedrooms (±1 allowed if req specifies)
-        if (req.bedrooms == null) {
-          // null/undefined means 'any', skip check
-        } else {
-          if (listing.bedrooms == null || Math.abs(listing.bedrooms - req.bedrooms) > 1) return false;
-        }
-
-      } else if (algorithmType === 'exploratory') {
-        // 2. Unit Type (Ignore)
-        // 3. Community (Ignore)
-        // 4. Price (Max +20%, Min -20%; allow any if req price is NA)
-         if (req.rawPrice && req.rawPrice !== 'NA') { // Only filter if req price is set
-           if (listing.price === null) return false;
-           const maxAllowed = req.priceMax ? req.priceMax * 1.20 : null;
-           const minAllowed = req.priceMin ? req.priceMin * 0.80 : null;
-           if (minAllowed !== null && listing.price < minAllowed) return false;
-           if (maxAllowed !== null && listing.price > maxAllowed) return false;
-         } // Allow any listing price if req price is NA
-        // 5. Unit Size (±30% allowed if req specifies)
-         if (req.size !== null) {
-           if (listing.size === null) return false; 
-           const sizeLowerBound = req.size * 0.7;
-           const sizeUpperBound = req.size * 1.3;
-           if (listing.size < sizeLowerBound || listing.size > sizeUpperBound) return false;
-         }
-        // 6. Bedrooms (Ignore)
-
-      } else if (algorithmType === 'custom') {
-        // Custom logic based on customRules state
-        const { matchUnitType, matchCommunity, priceTolerancePercent, sizeTolerancePercent, matchBedrooms } = customRules;
-
-        // 2. Unit Type (Match if specified)
-        if (matchUnitType && req.unitType && (!listing.unitType || listing.unitType !== req.unitType)) return false;
-
-        // 3. Community (Match based on custom rule)
-        if (matchCommunity === 'strict') {
-          if (req.rawCommunity && req.rawCommunity !== 'NA') { 
-            if (!listing.community || !req.communities.includes(listing.community)) return false;
-          } else { // If req community is NA, null, or empty, it's an incomplete requirement
-            return false; 
-          }
-        } else if (matchCommunity === 'flexible') {
-          if (req.rawCommunity && req.rawCommunity !== 'NA') { 
-            if (!listing.community || !req.communities.includes(listing.community)) return false;
-          }
-        }
-
-        // 4. Price (Custom tolerance)
-        if (req.rawPrice && req.rawPrice !== 'NA') { // Only filter if req price is set
-          if (listing.price === null) return false;
-          const maxAllowed = req.priceMax ? req.priceMax * (1 + priceTolerancePercent / 100) : null;
-          if (req.priceMin !== null && listing.price < req.priceMin) return false;
-          if (maxAllowed !== null && listing.price > maxAllowed) return false;
-        }
-
-        // 5. Unit Size (Custom tolerance)
-        if (req.size !== null) {
-          if (listing.size === null) return false; 
-          const sizeLowerBound = req.size * (1 - sizeTolerancePercent / 100);
-          const sizeUpperBound = req.size * (1 + sizeTolerancePercent / 100);
-          if (listing.size < sizeLowerBound || listing.size > sizeUpperBound) return false;
-        }
-
-        // 6. Bedrooms (Custom match)
-        if (matchBedrooms === 'strict') {
-          if (req.bedrooms == null) {
-            // null/undefined means 'any', skip check
-          } else {
-            if (listing.bedrooms == null || listing.bedrooms !== req.bedrooms) return false;
-          }
-        } else if (matchBedrooms === 'flexible') {
-          if (req.bedrooms == null) {
-            // null/undefined means 'any', skip check
-          } else {
-            if (listing.bedrooms == null || Math.abs(listing.bedrooms - req.bedrooms) > 1) return false;
-          }
-        }
-
-      }
-
-      // If all checks pass for the selected algorithm
-      return true; 
-    });
-  } catch (error) {
-    console.error("[findMatches] Error during filtering:", error, "Source:", sourceItem, "Target List:", targetList);
-    return []; // Return empty array on error
-  }
-};
-
-// --- React Component --- 
-function CardSection({ title, children }) {
-  return (
-    <section className="mb-4">
-      <h2 className="text-lg font-semibold mb-2 text-primary-foreground/80">{title}</h2>
-      <div>{children}</div>
-    </section>
-  );
-}
-
-function PropertyCard({ data, type }) {
-  // Helper to format currency (can be extracted later)
-  const formatCurrency = (value) => {
-    if (value === null || value === undefined) return 'N/A';
-    return parseFloat(value).toLocaleString('en-US', { style: 'currency', currency: 'AED', minimumFractionDigits: 0 });
-  };
-
-  // Helper to format range
-  const formatRange = (min, max, unit = '') => {
-    if (min === null && max === null) return 'N/A';
-    const minVal = min !== null ? parseFloat(min).toLocaleString('en-US') : 'Any';
-    const maxVal = max !== null ? parseFloat(max).toLocaleString('en-US') : 'Any';
-    if (minVal === maxVal) return `${minVal}${unit}`;
-    return `${minVal} - ${maxVal}${unit}`;
-  };
-
-  // Helper to display array items
-  const renderListItems = (items) => {
-    const validItems = Array.isArray(items) ? items.filter(Boolean) : typeof items === 'string' ? items.split(',').map(s => s.trim()).filter(Boolean) : [];
-    if (validItems.length === 0) return <span className="text-xs text-gray-500">None specified</span>;
-    return validItems.map((item, index) => (
-      <span key={index} className="bg-accent text-accent-foreground px-2 py-1 rounded text-xs">
-        {item}
-      </span>
-    ));
-  };
-
-  return (
-    <div className="bg-white rounded-xl shadow-md p-6 w-full border border-accent/30">
-      <h1 className="text-xl font-bold mb-4 text-primary">
-        {type === 'client' ? 'Client Requirement' : 'Listing'}
-      </h1>
-      {type === 'client' && (
-        <div className="mb-2 text-xs text-gray-500 font-mono">
-          Requirement ID: <span className="font-semibold text-primary">{data?.pk}</span>
-        </div>
-      )}
-      {type !== 'client' && data?.property_ref_no && (
-        <div className="mb-2 text-xs text-gray-500 font-mono">
-          Listing Ref: <span className="font-semibold text-primary">{data.property_ref_no}</span>
-        </div>
-      )}
-
-
-      <CardSection title="Basic Info">
-        <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-          {type === 'client' ? (
-            <>
-              <span className="font-medium">Transaction:</span>
-              <span>{data?.transaction_type || 'N/A'}</span>
-              <span className="font-medium">Budget:</span>
-              <span>{
-                (data?.budget_min_aed && data?.budget_max_aed)
-                  ? `${parseInt(data.budget_min_aed).toLocaleString()} - ${parseInt(data.budget_max_aed).toLocaleString()} AED`
-                  : data?.budget_min_aed
-                    ? `${parseInt(data.budget_min_aed).toLocaleString()} AED`
-                    : data?.budget_max_aed
-                      ? `${parseInt(data.budget_max_aed).toLocaleString()} AED`
-                      : 'N/A'
-              }</span>
-              <span className="font-medium">Unit Size:</span>
-              <span>{data?.area_sqft ? `${parseInt(data.area_sqft).toLocaleString()} sqft` : 'N/A'}</span>
-              <span className="font-medium">Communities:</span>
-              <span className="col-span-1">
-                {Array.isArray(data?.communities) && data.communities.length > 0 ? (
-                  <span className="flex flex-wrap gap-1">
-                    {data.communities.map((c, i) => (
-                      <span key={i} className="bg-accent text-accent-foreground px-2 py-1 rounded text-xs">{c}</span>
-                    ))}
-                  </span>
-                ) : (
-                  data?.communities || 'N/A'
-                )}
-              </span>
-              <span className="font-medium">Bedrooms:</span>
-              <span>{data?.bedr_num !== undefined && data?.bedr_num !== null ? data.bedr_num : 'N/A'}</span>
-              <span className="font-medium">Bathrooms:</span>
-              <span>{data?.bathr_num !== undefined && data?.bathr_num !== null ? data.bathr_num : 'N/A'}</span>
-              <span className="font-medium">Unit Type:</span>
-              <span>{data?.property_type || 'N/A'}</span>
-            </>
-          ) : (
-            <>
-              <span className="font-medium">Transaction:</span>
-              <span>{data?.transaction_type || 'N/A'}</span>
-              <span className="font-medium">Price:</span>
-              <span>{data?.price_aed ? `${parseInt(data.price_aed).toLocaleString()} AED` : 'N/A'}</span>
-              <span className="font-medium">Unit Size:</span>
-              <span>{data?.area_sqft ? `${parseInt(data.area_sqft).toLocaleString()} sqft` : 'N/A'}</span>
-              <span className="font-medium">Community:</span>
-              <span>{data?.community || 'N/A'}</span>
-              <span className="font-medium">Bedrooms:</span>
-              <span>{data?.bedr_num !== undefined && data?.bedr_num !== null ? data.bedr_num : 'N/A'}</span>
-              <span className="font-medium">Bathrooms:</span>
-              <span>{data?.bathr_num !== undefined && data?.bathr_num !== null ? data.bathr_num : 'N/A'}</span>
-              <span className="font-medium">Unit Type:</span>
-              <span>{data?.property_type || 'N/A'}</span>
-              <span className="font-medium">Listing Ref:</span>
-              <span>{data?.property_ref_no || 'N/A'}</span>
-              <span className="font-medium">Listing Title:</span>
-              <span>{data?.listing_title || 'N/A'}</span>
-            </>
-          )}
-        </div>
-      </CardSection>
-      <CardSection title={type === 'client' ? 'Source' : 'Listing Info'}>
-        <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-          {type === 'client' ? (
-            <>
-              {/* Assuming fields like client_name, client_phone */} 
-              <span className="font-medium">Client Name:</span>
-              <span>{data?.client_name || 'N/A'}</span>
-              <span className="font-medium">Client Phone:</span>
-              <span>{data?.client_phone || 'N/A'}</span>
-              <span className="font-medium">Source Agent:</span>
-              <span>{data?.agent_name || 'N/A'}</span>
-            </>
-          ) : (
-            <>
-              <span className="font-medium">Listing Agent:</span>
-              <span>{data?.agent_name || 'N/A'}</span>
-              <span className="font-medium">Days on Market:</span>
-              <span>{(() => {
-                if (!data?.created_at) return 'N/A';
-                // Ensure standard ISO format (replace space with T)
-                const dateString = data.created_at.replace(' ', 'T');
-                const created = new Date(dateString);
-                if (isNaN(created.getTime())) { // Check if date parsing failed
-                  console.error("Failed to parse date:", data.created_at);
-                  return 'N/A'; 
-                }
-                const today = new Date();
-                // Compare timestamps directly to avoid timezone issues
-                const diff = Math.floor((today.getTime() - created.getTime()) / (1000 * 60 * 60 * 24));
-                return diff >= 0 ? diff : '0'; // Show 0 if created today, handle potential microsecond differences
-              })()}</span>
-              <span className="font-medium">Listing Ref:</span>
-              <span>{data?.listing_ref_no || data?.property_ref_no || 'N/A'}</span>
-            </>
-          )}
-        </div>
-      </CardSection>
-      <CardSection title="Amenities / Facilities">
-        <div className="flex flex-wrap gap-2">
-          {Array.isArray(data?.facilities) && data.facilities.length > 0
-            ? data.facilities.map((a, i) => (
-                <span key={i} className="bg-accent text-accent-foreground px-2 py-1 rounded text-xs">
-                  {a}
-                </span>
-              ))
-            : <span className="text-xs text-gray-500">None specified</span>
-          }
-        </div>
-      </CardSection>
-
-      {type !== 'client' && data?.other_details && (
-        <CardSection title="Description">
-          <p className="text-sm text-gray-700 whitespace-pre-wrap">{data.other_details}</p>
-        </CardSection>
-      )}
-
-      {type === 'client' ? (
-        <CardSection title="Other Details">
-          <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-            <span className="font-medium">Move-in Date:</span>
-            <span>{data?.move_date || 'N/A'}</span>
-            <span className="font-medium">Furnishing:</span>
-            <span>{data?.furnishing || 'Any'}</span>
-            <span className="font-medium">Other Details:</span>
-            <span className="col-span-1">{data?.other_details || 'None'}</span>
-          </div>
-        </CardSection>
-      ) : (
-        <CardSection title="Images & Details">
-          <div className="flex flex-col gap-2">
-            <span className="font-medium text-sm">Furnishing: {data?.furnishing || 'N/A'}</span>
-            {/* Render all images as thumbnails */}
-            {Array.isArray(data?.images) && data.images.length > 0 ? (
-              <div className="flex flex-wrap gap-2 mt-2"> 
-                {data.images.map((img, i) => (
-                  <img key={i} src={img} alt={`Listing Image ${i+1}`} className="rounded-lg border w-24 h-24 object-cover" />
-                ))}
-              </div>
-            ) : (
-              <span className="text-xs text-gray-500">No images</span>
-            )}
-          </div>
-        </CardSection>
-      )}
-    </div>
-  );
-}
-
-function MatchingPage() {
-  // --- LOG MOVED --- 
-
+// --- Main MatchingPage Component ---
+const MatchingPage = () => {
+  // --- State --- 
   const [listingsData, setListingsData] = useState([]);
   const [requirementsData, setRequirementsData] = useState([]);
   const [selectedListingId, setSelectedListingId] = useState('');
-  console.log('[MatchingPage Render] selectedListingId:', selectedListingId);
   const [selectedRequirementId, setSelectedRequirementId] = useState('');
-  const [suggestedMatches, setSuggestedMatches] = useState([]);
-  const [transactionTypeFilter, setTransactionTypeFilter] = useState('All'); // Rent, Sale, All
-  const [selectedAlgorithm, setSelectedAlgorithm] = useState('priority'); // Algorithm state
-  const [loading, setLoading] = useState(true);
+  const [displayedMatches, setDisplayedMatches] = useState([]); // State for matches of the selected item
+  const [loading, setLoading] = useState(false); // Combined loading state for initial fetch and match fetch
   const [error, setError] = useState(null);
+  const [selectedAlgorithm, setSelectedAlgorithm] = useState('v1'); // State for algorithm
+  const [transactionTypeFilter, setTransactionTypeFilter] = useState('All'); // 'All', 'Sale', 'Rent'
+  const [listingMatchCounts, setListingMatchCounts] = useState({}); // New state for listing counts { pk: count }
+  const [requirementMatchCounts, setRequirementMatchCounts] = useState({}); // New state for requirement counts { pk: count }
+  const [countsLoading, setCountsLoading] = useState(false); // New state for counts loading
 
-  // --- State for Custom Match Rules --- 
-  const [customRules, setCustomRules] = useState({
-    matchUnitType: true,      // Checkbox: Must unit types match?
-    matchCommunity: 'strict', // Select: 'strict' (must match), 'flexible' (allow NA), 'ignore'
-    priceTolerancePercent: 20, // Number input/slider: % allowance above max price
-    sizeTolerancePercent: 30,  // Number input/slider: +/- % allowance for size
-    matchBedrooms: 'flexible' // Select: 'strict' (exact), 'flexible' (+/- 1), 'ignore'
-  });
+  // --- Constants --- 
+  const LISTINGS_TABLE = 'wa_group_listings'; 
+  const REQUIREMENTS_TABLE = 'wa_group_client_reqs'; // Define constant
 
-  // Handler for updating custom rules
-  const handleCustomRuleChange = (ruleName, value) => {
-    setCustomRules(prevRules => ({
-      ...prevRules,
-      [ruleName]: value
-    }));
-  };
+  // --- Effects --- 
 
-  // Constants for table names
-  const LISTINGS_TABLE = 'wa_group_listings';
-  const REQUIREMENTS_TABLE = 'wa_group_client_reqs';
-
-  // --- MOVED useMemo hooks for selected items RIGHT AFTER useState --- 
-  const selectedListing = useMemo(() => {
-    if (!selectedListingId) return null;
-    console.log('[useMemo SelectedListing] Finding listing ID:', selectedListingId);
-    // console.log('[useMemo SelectedListing] Searching in listingsData:', listingsData);
-    const found = listingsData.find(l => String(l.pk) === selectedListingId);
-    console.log('[useMemo SelectedListing] Found:', found);
-    return found;
-  }, [selectedListingId, listingsData]);
-  
-  const selectedRequirement = useMemo(() => {
-    if (!selectedRequirementId) return null;
-    console.log('[useMemo SelectedRequirement] Finding requirement ID:', selectedRequirementId);
-    // console.log('[useMemo SelectedRequirement] Searching in requirementsData:', requirementsData);
-    const found = requirementsData.find(r => String(r.pk) === selectedRequirementId);
-    console.log('[useMemo SelectedRequirement] Found:', found);
-    return found;
-  }, [selectedRequirementId, requirementsData]);
-
-  // Fetch data on component mount
+  // Fetch initial data
   useEffect(() => {
+    setLoading(true);
+    let isMounted = true; 
     const fetchData = async () => {
-      setLoading(true); // Set loading true at the start
-      setError(null); // Clear previous errors
       try {
-        const [fetchedListings, fetchedRequirements] = await Promise.all([
+        const [listingsResponse, requirementsResponse] = await Promise.all([
           fetchTableData(LISTINGS_TABLE),
           fetchTableData(REQUIREMENTS_TABLE)
         ]);
-        setListingsData(fetchedListings || []);
-        setRequirementsData(fetchedRequirements || []);
-
-      } catch (err) {
-        console.error("Error fetching matching data:", err);
-        setError("Failed to load listings and requirements.");
-        setListingsData([]);
-        setRequirementsData([]);
+        if (isMounted) {
+            setListingsData(listingsResponse || []);
+            setRequirementsData(requirementsResponse || []);
+            setError(null);
+        }
+      } catch (error) {
+        console.error("Error fetching data:", error);
+        if (isMounted) {
+            setError(error.message);
+            setListingsData([]);
+            setRequirementsData([]);
+        }
       } finally {
-        setLoading(false); // Set loading false on success or error
+        if (isMounted) setLoading(false);
       }
     };
     fetchData();
-  }, []);
+    return () => { isMounted = false; }; // Cleanup on unmount
+  }, []); // Run only once on mount
 
-  // Calculate potential match counts for each listing
-  const listingsWithMatchCounts = useMemo(() => {
-    console.log('[useMemo] Calculating listing match counts. Algo:', selectedAlgorithm);
-    if (!Array.isArray(listingsData) || !Array.isArray(requirementsData)) {
-        console.warn('[useMemo] listingsData or requirementsData not ready for listing counts.');
-        return [];
-    }
-    return listingsData.map(listing => ({
-      ...listing,
-      _matchCount: findMatches(listing, 'listing', requirementsData, selectedAlgorithm).length // Pass algorithm
-    }));
-  }, [listingsData, requirementsData, selectedAlgorithm]); // Add selectedAlgorithm dependency
+  // Fetch match counts
+  useEffect(() => {
+    const fetchCounts = async () => {
+      if (!getSupabaseClient()) return;
+      setCountsLoading(true);
+      try {
+        const [listingCountsRes, requirementCountsRes] = await Promise.all([
+          getSupabaseClient().rpc('get_match_counts', {
+            p_source_type: 'listing',
+            p_match_algorithm: selectedAlgorithm,
+            p_transaction_filter: transactionTypeFilter
+          }),
+          getSupabaseClient().rpc('get_match_counts', {
+            p_source_type: 'requirement',
+            p_match_algorithm: selectedAlgorithm,
+            p_transaction_filter: transactionTypeFilter
+          })
+        ]);
 
-  // Calculate potential match counts for each requirement
-  const requirementsWithMatchCounts = useMemo(() => {
-    console.log('[useMemo] Calculating requirement match counts. Algo:', selectedAlgorithm);
-     if (!Array.isArray(listingsData) || !Array.isArray(requirementsData)) {
-        console.warn('[useMemo] listingsData or requirementsData not ready for requirement counts.');
-        return [];
-    }
-    return requirementsData.map(req => ({
-      ...req,
-      _matchCount: findMatches(req, 'client', listingsData, selectedAlgorithm).length // Pass algorithm
-    }));
-  }, [listingsData, requirementsData, selectedAlgorithm]); // Add selectedAlgorithm dependency
+        if (listingCountsRes.error) throw listingCountsRes.error;
+        if (requirementCountsRes.error) throw requirementCountsRes.error;
 
-  // Filter based on transaction type *after* calculating counts
+        // Convert arrays to maps for easy lookup
+        const listingCountsMap = (listingCountsRes.data || []).reduce((acc, item) => {
+          acc[item.source_pk] = item.match_count;
+          return acc;
+        }, {});
+        const requirementCountsMap = (requirementCountsRes.data || []).reduce((acc, item) => {
+          acc[item.source_pk] = item.match_count;
+          return acc;
+        }, {});
+
+        setListingMatchCounts(listingCountsMap);
+        setRequirementMatchCounts(requirementCountsMap);
+
+      } catch (err) {
+        console.error("Error fetching match counts:", err);
+        // Optionally set an error state for counts
+      } finally {
+        setCountsLoading(false);
+      }
+    };
+
+    fetchCounts();
+  }, [selectedAlgorithm, transactionTypeFilter]); // Re-fetch when algorithm or filter changes
+
+  // Filter dropdown options based on transaction type
   const filteredListings = useMemo(() => {
-    if (transactionTypeFilter === 'All') return listingsWithMatchCounts;
-    return listingsWithMatchCounts.filter(listing => 
-      listing.transaction_type && listing.transaction_type.toLowerCase() === transactionTypeFilter.toLowerCase()
+    if (transactionTypeFilter === 'All') return listingsData; // Use original data
+    return listingsData.filter(listing => 
+        listing.transaction_type?.toLowerCase() === transactionTypeFilter.toLowerCase()
     );
-  }, [listingsWithMatchCounts, transactionTypeFilter]);
+  }, [listingsData, transactionTypeFilter]);
 
   const filteredRequirements = useMemo(() => {
-    if (transactionTypeFilter === 'All') return requirementsWithMatchCounts;
-    return requirementsWithMatchCounts.filter(req => 
-      req.transaction_type && req.transaction_type.toLowerCase() === transactionTypeFilter.toLowerCase()
+    if (transactionTypeFilter === 'All') return requirementsData; // Use original data
+    return requirementsData.filter(req => 
+        req.transaction_type?.toLowerCase() === transactionTypeFilter.toLowerCase()
     );
-  }, [requirementsWithMatchCounts, transactionTypeFilter]);
+  }, [requirementsData, transactionTypeFilter]);
 
-  // --- NEW: Effect to reset selections ONLY when filter changes --- 
-  useEffect(() => {
-    // Check if current listing selection is still valid under the new filter
-    const selectedListing = listingsWithMatchCounts.find(listing => String(listing.pk) === selectedListingId);
-    if (selectedListingId && selectedListing && transactionTypeFilter !== 'All' && 
-        selectedListing.transaction_type?.toLowerCase() !== transactionTypeFilter.toLowerCase()) {
-      console.log(`[Filter Reset] Clearing listing selection ${selectedListingId} due to filter change to ${transactionTypeFilter}`);
-      setSelectedListingId('');
-    }
+  // Find the currently selected full listing/requirement object from the initially fetched data
+  const selectedListing = useMemo(() => {
+    if (!selectedListingId) return null;
+    // Find from original listingsData, not calculatedListings
+    return listingsData.find(l => l.pk === parseInt(selectedListingId));
+  }, [selectedListingId, listingsData]);
 
-    // Check if current requirement selection is still valid under the new filter
-    const selectedRequirement = requirementsWithMatchCounts.find(req => String(req.pk) === selectedRequirementId);
-    if (selectedRequirementId && selectedRequirement && transactionTypeFilter !== 'All' && 
-        selectedRequirement.transaction_type?.toLowerCase() !== transactionTypeFilter.toLowerCase()) {
-      console.log(`[Filter Reset] Clearing requirement selection ${selectedRequirementId} due to filter change to ${transactionTypeFilter}`);
-      setSelectedRequirementId('');
-    }
-    // Note: We use listingsWithMatchCounts/requirementsWithMatchCounts here as filteredX might not yet be updated
-    // This effect ONLY depends on the filter changing.
-  }, [transactionTypeFilter, listingsWithMatchCounts, requirementsWithMatchCounts]); // Dependencies refined
+  const selectedRequirement = useMemo(() => {
+    if (!selectedRequirementId) return null;
+    // Find from original requirementsData, not calculatedRequirements
+    return requirementsData.find(req => req.pk === parseInt(selectedRequirementId));
+  }, [selectedRequirementId, requirementsData]);
 
 
-  // --- Effect for Calculating Matches --- 
-  useEffect(() => {
-    console.log(`[useEffect] Calculating suggested matches. Source: ${selectedListingId || selectedRequirementId}, Algo: ${selectedAlgorithm}`);
-    let sourceItem = null;
-    let sourceItemType = '';
-    let targetList = [];
+  // --- Handlers --- 
+  const handleListingSelect = async (event) => {
+    const pk = event.target.value;
+    setSelectedListingId(pk);
+    setSelectedRequirementId(''); // Clear requirement selection
+    setDisplayedMatches([]); // Clear previous matches
+    setError(null); // Clear previous errors
 
-    // Determine the source item and the list to compare against
-    if (selectedRequirementId) {
-      // Ensure comparison works even if pk is number and selectedRequirementId is string
-      sourceItem = filteredRequirements.find(req => String(req.pk) === selectedRequirementId); 
-      sourceItemType = 'client';
-      targetList = filteredListings;
-    } else if (selectedListingId) {
-      // Ensure comparison works even if pk is number and selectedListingId is string
-      sourceItem = filteredListings.find(listing => String(listing.pk) === selectedListingId); 
-      sourceItemType = 'listing';
-      targetList = filteredRequirements;
-    }
+    if (pk) {
+      setLoading(true); // Start loading matches
+      try {
+        console.log(`Fetching matches for listing PK: ${pk}, Algorithm: ${selectedAlgorithm}, Filter: ${transactionTypeFilter}`);
+        const supabase = getSupabaseClient(); // Get client instance
+        const { data: matchesData, error: rpcError } = await supabase.rpc('get_matches', {
+          p_source_pk: parseInt(pk),
+          p_source_type: 'listing',
+          p_match_algorithm: selectedAlgorithm,
+          p_transaction_filter: transactionTypeFilter
+        });
 
-    if (sourceItem && Array.isArray(targetList)) { // Added check for targetList
-      console.log('[useEffect] Calling findMatches with:', sourceItem, sourceItemType, targetList.length, selectedAlgorithm);
-      const matches = findMatches(sourceItem, sourceItemType, targetList, selectedAlgorithm); // Pass algorithm
-      console.log('[useEffect] Matches found:', matches);
-      setSuggestedMatches(matches || []); 
+        if (rpcError) {
+          throw rpcError;
+        }
+
+        console.log("Found Matching Requirements:", matchesData); // Debugging
+        setDisplayedMatches(matchesData || []); // Update state with matches
+      } catch (err) {
+        console.error("Error fetching matching requirements:", err);
+        setError(err.message || 'Failed to fetch matching requirements');
+        setDisplayedMatches([]); // Clear matches on error
+      } finally {
+        setLoading(false); // Stop loading matches
+      }
     } else {
-      console.log('[useEffect] No source item or invalid target list, clearing matches.');
-      setSuggestedMatches([]); 
-    }
-
-  }, [selectedListingId, selectedRequirementId, filteredListings, filteredRequirements, selectedAlgorithm, customRules]); // Add customRules dependency
-
-  // --- NEW: Handlers for Selection Dropdowns ---
-  const handleListingSelect = (e) => {
-    const newListingId = e.target.value;
-    setSelectedListingId(newListingId);
-    if (newListingId) { // Restore cross-clearing
-      setSelectedRequirementId('');
+      // No PK selected, clear everything
+      setDisplayedMatches([]); 
+      setError(null);
     }
   };
 
-  const handleRequirementSelect = (e) => {
-    const newRequirementId = e.target.value;
-    setSelectedRequirementId(newRequirementId);
-    if (newRequirementId) { // Restore cross-clearing
-      setSelectedListingId('');
+  const handleRequirementSelect = async (event) => {
+    const pk = event.target.value;
+    setSelectedRequirementId(pk);
+    setSelectedListingId(''); // Clear listing selection
+    setDisplayedMatches([]); // Clear previous matches
+    setError(null); // Clear previous errors
+
+    if (pk) {
+      setLoading(true); // Start loading matches
+       try {
+        console.log(`Fetching matches for requirement PK: ${pk}, Algorithm: ${selectedAlgorithm}, Filter: ${transactionTypeFilter}`);
+        const supabase = getSupabaseClient(); // Get client instance
+        const { data: matchesData, error: rpcError } = await supabase.rpc('get_matches', {
+          p_source_pk: parseInt(pk),
+          p_source_type: 'requirement',
+          p_match_algorithm: selectedAlgorithm,
+          p_transaction_filter: transactionTypeFilter
+        });
+
+        if (rpcError) {
+          throw rpcError;
+        }
+        console.log("Found Matching Listings:", matchesData); // Debugging
+        setDisplayedMatches(matchesData || []); // Update state with matches
+      } catch (err) {
+        console.error("Error fetching matching listings:", err);
+        setError(err.message || 'Failed to fetch matching listings');
+        setDisplayedMatches([]); // Clear matches on error
+      } finally {
+        setLoading(false); // Stop loading matches
+      }
+    } else {
+        // No PK selected, clear everything
+        setDisplayedMatches([]); 
+        setError(null);
     }
   };
 
+  // Restore handler for Transaction Type Filter
+  const handleTransactionTypeFilterChange = (e) => {
+    setTransactionTypeFilter(e.target.value);
+    // Clear selections when filter changes
+    setSelectedListingId(''); 
+    setSelectedRequirementId('');
+    setDisplayedMatches([]);
+  };
 
-  if (loading) return <div className="p-8 text-center">Loading...</div>;
-  if (error) return <div className="p-8 text-center text-red-600">Error: {error}</div>;
+  const handleAlgorithmChange = (event) => {
+    setSelectedAlgorithm(event.target.value);
+    // Clear selections and displayed matches when algorithm changes
+    setSelectedListingId(''); 
+    setSelectedRequirementId('');
+    setDisplayedMatches([]);
+  };
 
+  // --- UI Rendering --- 
+  if (loading) return <div className="p-4">Loading data...</div>; // Combined loading state
+  if (error) return <div className="p-4 text-red-600">Error: {error}</div>;
 
-  // --- Render Logic ---
   return (
-    <div className="flex flex-col p-8 bg-background min-h-screen" data-component-name="MatchingPage">
-      <h1 className="text-2xl font-bold mb-6 text-primary">Matching Engine</h1>
+    <div className="container mx-auto p-4 space-y-6">
+      <h1 className="text-2xl font-bold mb-4">Property Matcher</h1>
 
-      {/* Manual Matching Section */}
-      <div>
-        <h2 className="text-xl font-semibold mb-4">Manual Selection</h2>
-
-        {/* Filters Row */}
-        <div className="flex flex-wrap gap-4 items-center mb-6">
-          {/* Transaction Type Filter */}
-          <div className="flex items-center space-x-2">
-            <label htmlFor="transactionTypeFilter" className="text-sm font-medium text-gray-700">Transaction Type:</label>
-            <select 
-              id="transactionTypeFilter"
-              value={transactionTypeFilter}
-              onChange={(e) => setTransactionTypeFilter(e.target.value)}
-              className="block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
-            >
-              <option value="All">All Types</option>
-              <option value="Rent">Rent</option>
-              <option value="Sale">Sale</option>
-            </select>
-          </div>
-
-          {/* Algorithm Selector */}
-          <div className="flex items-center space-x-2">
-            <label htmlFor="algorithmSelector" className="text-sm font-medium text-gray-700">Matching Algorithm:</label>
-            <select 
-              id="algorithmSelector"
-              value={selectedAlgorithm}
-              onChange={(e) => setSelectedAlgorithm(e.target.value)}
-              className="block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
-            >
-              <option value="exact">Exact Match</option>
-              <option value="priority">Priority Match</option>
-              <option value="exploratory">Exploratory Match</option>
-              <option value="custom">Custom Match</option> {/* Enabled */}
-            </select>
-          </div>
+      {/* Filters Row */}
+      <div className="flex gap-4 mb-6 items-end">
+        {/* Transaction Type Filter Dropdown */}
+        <div className="mb-4 md:mb-0">
+          <label htmlFor="transactionTypeFilter" className="block text-sm font-medium text-gray-700 mb-1">Transaction Type:</label>
+          <select
+            id="transactionTypeFilter"
+            name="transactionTypeFilter"
+            value={transactionTypeFilter}
+            onChange={handleTransactionTypeFilterChange}
+            className="block w-full p-2 text-sm text-gray-700 rounded-lg border border-gray-300 focus:ring-blue-500 focus:border-blue-500"
+          >
+            <option value="All">All</option>
+            <option value="Sale">Sale</option>
+            <option value="Rent">Rent</option>
+          </select>
         </div>
 
-        {/* --- ADDED: Selection Dropdowns Row --- */}
-        <div className="flex flex-wrap gap-4 items-start mb-6"> {/* Use items-start for alignment */}
-            
-            {/* Listing Selector */}
-            <div className="flex-1 min-w-[200px]"> {/* Allow dropdowns to grow */}
-              <label htmlFor="listingSelector" className="block text-sm font-medium text-gray-700 mb-1">Select Listing:</label>
-              <select
-                id="listingSelector"
-                value={selectedListingId}
-                onChange={handleListingSelect} // Use new handler
-                className="block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
-                disabled={!listingsWithMatchCounts || listingsWithMatchCounts.length === 0} // Disable if no base listings
-              >
-                <option value="">-- Select a Listing --</option>
-                {listingsWithMatchCounts.map((listing) => {
-                  // Conditional rendering based on filter
-                  const matchesFilter = transactionTypeFilter === 'All' || 
-                                        (listing.transaction_type && listing.transaction_type.toLowerCase() === transactionTypeFilter.toLowerCase());
-                  
-                  if (!matchesFilter) return null; // Skip rendering if it doesn't match filter
-
-                  return (
-                    <option key={listing.pk} value={String(listing.pk)}> {/* Cast value to string */}
-                      {/* Updated display text */}
-                      Ref: {listing.property_ref_no || 'N/A'} - {listing.title || 'No Title'} ({listing.community || 'No Community'}) - Matches: {listing._matchCount}
-                    </option>
-                  );
-                })}
-              </select>
-            </div>
-
-            {/* Requirement Selector */}
-            <div className="flex-1 min-w-[200px]"> {/* Allow dropdowns to grow */}
-              <label htmlFor="requirementSelector" className="block text-sm font-medium text-gray-700 mb-1">Select Client Requirement:</label>
-              <select
-                id="requirementSelector"
-                value={selectedRequirementId}
-                onChange={handleRequirementSelect} // Use new handler
-                className="block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
-                disabled={!requirementsWithMatchCounts || requirementsWithMatchCounts.length === 0} // Disable if no base requirements
-              >
-                <option value="">-- Select a Requirement --</option>
-                {requirementsWithMatchCounts.map((req) => {
-                   // Conditional rendering based on filter
-                   const matchesFilter = transactionTypeFilter === 'All' || 
-                                         (req.transaction_type && req.transaction_type.toLowerCase() === transactionTypeFilter.toLowerCase());
-
-                   if (!matchesFilter) return null; // Skip rendering if it doesn't match filter
-
-                  return (
-                    <option key={req.pk} value={String(req.pk)}> {/* Cast value to string */}
-                      {/* Basic display - enhance as needed */}
-                      {req.pk} - {req.client_name || 'No Name'} ({req.property_type || 'Any Type'}) - Matches: {req._matchCount}
-                    </option>
-                  );
-                })}
-              </select>
-            </div>
+        {/* Algorithm Selector Dropdown */}
+        <div className="mb-4 md:mb-0">
+          <label htmlFor="algorithmSelector" className="block text-sm font-medium text-gray-700 mb-1">Matching Algorithm:</label>
+          <select
+            id="algorithmSelector"
+            name="algorithmSelector"
+            value={selectedAlgorithm}
+            onChange={handleAlgorithmChange}
+            className="block w-full p-2 text-sm text-gray-700 rounded-lg border border-gray-300 focus:ring-blue-500 focus:border-blue-500"
+          >
+            {Object.keys(ALGORITHM_DESCRIPTIONS).map(algoKey => (
+              <option key={algoKey} value={algoKey}>
+                {ALGORITHM_DESCRIPTIONS[algoKey].title}
+              </option>
+            ))}
+          </select>
         </div>
 
-        {/* Custom Rules Section (Only shown if algorithm is 'custom') */}
-        {selectedAlgorithm === 'custom' && (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6 p-4 border rounded bg-gray-50">
-            <h3 className="md:col-span-3 text-lg font-semibold mb-2">Custom Match Rules</h3>
-            
-            {/* Unit Type */} 
-            <div className="flex items-center space-x-2">
-              <input 
-                type="checkbox" 
-                id="customMatchUnitType"
-                checked={customRules.matchUnitType}
-                onChange={(e) => handleCustomRuleChange('matchUnitType', e.target.checked)}
-                className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded"
-              />
-              <label htmlFor="customMatchUnitType" className="text-sm font-medium text-gray-700">Match Unit Type?</label>
-            </div>
-
-            {/* Community Matching */} 
-            <div>
-              <label htmlFor="customMatchCommunity" className="block text-sm font-medium text-gray-700 mb-1">Community Match:</label>
-              <select 
-                id="customMatchCommunity"
-                value={customRules.matchCommunity}
-                onChange={(e) => handleCustomRuleChange('matchCommunity', e.target.value)}
-                className="block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
-              >
-                <option value="strict">Strict (Must match, no NA)</option>
-                <option value="flexible">Flexible (Match if specified, allow NA)</option>
-                <option value="ignore">Ignore Community</option>
-              </select>
-            </div>
-
-             {/* Bedrooms Matching */} 
-            <div>
-              <label htmlFor="customMatchBedrooms" className="block text-sm font-medium text-gray-700 mb-1">Bedrooms Match:</label>
-              <select 
-                id="customMatchBedrooms"
-                value={customRules.matchBedrooms}
-                onChange={(e) => handleCustomRuleChange('matchBedrooms', e.target.value)}
-                className="block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
-              >
-                <option value="strict">Strict (Exact match)</option>
-                <option value="flexible">Flexible (+/- 1 Bed)</option>
-                <option value="ignore">Ignore Bedrooms</option>
-              </select>
-            </div>
-
-            {/* Price Tolerance */} 
-            <div>
-              <label htmlFor="customPriceTolerance" className="block text-sm font-medium text-gray-700 mb-1">Max Price Tolerance (%):</label>
-              <input 
-                type="number"
-                id="customPriceTolerance"
-                min="0"
-                max="100"
-                value={customRules.priceTolerancePercent}
-                onChange={(e) => handleCustomRuleChange('priceTolerancePercent', parseInt(e.target.value, 10) || 0)}
-                className="block w-full pl-3 pr-3 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
-              />
-            </div>
-
-            {/* Size Tolerance */} 
-            <div>
-              <label htmlFor="customSizeTolerance" className="block text-sm font-medium text-gray-700 mb-1">Unit Size Tolerance (+/- %):</label>
-              <input 
-                type="number"
-                id="customSizeTolerance"
-                min="0"
-                max="100"
-                value={customRules.sizeTolerancePercent}
-                onChange={(e) => handleCustomRuleChange('sizeTolerancePercent', parseInt(e.target.value, 10) || 0)}
-                className="block w-full pl-3 pr-3 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
-              />
-            </div>
-
-          </div>
-        )}
-
-        {/* Selection and Display Grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          {/* Column 1: Selected Items */}
-          <div className="lg:col-span-1 space-y-4">
-            <h3 className="text-lg font-semibold mb-3">Selected Item(s)</h3>
-            <div className="flex-1">
-              <h2 className="text-lg font-semibold mb-2 text-primary-foreground/80">Selected Listing</h2>
-              {selectedListingId ? (
-                <PropertyCard data={selectedListing} type="listing" /> 
-              ) : (
-                <div className="text-center p-4 border rounded-lg bg-muted text-muted-foreground">Select a listing to view details.</div>
-              )}
-            </div>
-            <div className="flex-1">
-              <h2 className="text-lg font-semibold mb-2 text-primary-foreground/80">Selected Requirement</h2>
-              {selectedRequirementId ? (
-                <PropertyCard data={selectedRequirement} type="client" /> 
-              ) : (
-                <div className="text-center p-4 border rounded-lg bg-muted text-muted-foreground">Select a requirement to view details.</div>
-              )}
-            </div>
-            {!selectedListingId && !selectedRequirementId && (
-               <p className="text-sm text-gray-500 p-4 border rounded bg-gray-50">Select a listing or requirement above to view details.</p>
-            )}
-          </div>
-
-          {/* Column 2: Suggested Matches */}
-          <div className="lg:col-span-2">
-            <h3 className="text-lg font-semibold mb-3">Suggested Matches ({suggestedMatches.length})</h3>
-            {suggestedMatches.length > 0 ? (
-              <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-2"> 
-                {suggestedMatches.map(match => (
-                  <PropertyCard 
-                    key={match.pk} 
-                    data={match} 
-                    type={selectedRequirementId ? 'listing' : 'client'} 
-                  />
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-gray-500 p-4 border rounded bg-gray-50">
-                {(selectedListingId || selectedRequirementId) ? 
-                'No matching items found based on the criteria.' : 
-                'Matching suggestions will appear here once an item is selected.'
-              }</p>
-            )}
-          </div>
+        {/* Loading/Error Indicator for Match Fetching */} 
+        <div className="flex items-end justify-end">
+          {loading && (selectedListingId || selectedRequirementId) && <p className="text-sm text-blue-600">Loading matches...</p>}
+          {error && <p className="text-sm text-red-600">Error: {error}</p>}
         </div>
       </div>
+
+      {/* --- Matching Criteria Help Section (Dynamic) --- */}
+      {ALGORITHM_DESCRIPTIONS[selectedAlgorithm] && (
+        <div className="bg-blue-50 border border-blue-200 text-blue-800 p-4 rounded-lg text-sm mb-6">
+          <h3 className="font-semibold mb-2">{ALGORITHM_DESCRIPTIONS[selectedAlgorithm].title}</h3>
+          <ul className="list-disc pl-5 space-y-1">
+            {ALGORITHM_DESCRIPTIONS[selectedAlgorithm].criteria.map((item, index) => (
+              <li key={index}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Main Content Area - Selections */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+        {/* Listing Selector */} 
+        <div>
+          <label className="font-medium block mb-1">Select Listing:</label>
+          <select value={selectedListingId} onChange={handleListingSelect} className="block w-full p-2 text-sm text-gray-700 rounded-lg border border-gray-300 focus:ring-blue-500 focus:border-blue-500">
+            <option value="">-- Select Listing --</option>
+            {filteredListings.length === 0 ? (
+              <option value="" disabled>No listings match filter</option>
+            ) : (
+              filteredListings.map(listing => {
+                const count = listingMatchCounts[listing.pk];
+                const countText = countsLoading ? '(Loading...)' : (count !== undefined ? `(${count})` : '');
+                const label = `${listing.listing_title || `Ref: ${listing.property_ref_no || listing.pk}`} ${countText}`;
+                return (
+                  <option key={listing.pk} value={listing.pk} disabled={loading && selectedListingId === listing.pk.toString()}> 
+                    {label}
+                  </option>
+                );
+              })
+            )}
+          </select>
+        </div>
+
+        {/* Requirement Selector */} 
+        <div>
+          <label className="font-medium block mb-1">Select Requirement:</label>
+          <select value={selectedRequirementId} onChange={handleRequirementSelect} className="block w-full p-2 text-sm text-gray-700 rounded-lg border border-gray-300 focus:ring-blue-500 focus:border-blue-500">
+            <option value="">-- Select Requirement --</option>
+            {filteredRequirements.length === 0 ? (
+              <option value="" disabled>No requirements match filter</option>
+            ) : (
+              filteredRequirements.map(req => {
+                const count = requirementMatchCounts[req.pk];
+                const countText = countsLoading ? '(Loading...)' : (count !== undefined ? `(${count})` : '');
+                const label = `${req.client_name || `ID: ${req.pk}`} ${countText}`;
+                return (
+                  <option key={req.pk} value={req.pk} disabled={loading && selectedRequirementId === req.pk.toString()}>
+                    {label}
+                  </option>
+                );
+              })
+            )}
+          </select>
+        </div>
+      </div>
+
+      {/* Selected Item and Matches */}
+      {(selectedListing || selectedRequirement) && (
+        <div className="mt-6">
+          {selectedListingId && (
+            <div className="flex flex-col lg:flex-row gap-4"> 
+              {/* Selected Listing Card */} 
+              {selectedListing && (
+                <div className="border p-4 rounded-lg bg-gray-50 h-fit lg:w-1/2"> 
+                  <h3 className="font-semibold text-lg mb-2">
+                    Selected Listing {listingMatchCounts[selectedListing.pk] !== undefined ? `(${listingMatchCounts[selectedListing.pk]})` : ''}
+                  </h3>
+                  <CardSection data={selectedListing} type="listing" />
+                </div>
+              )}
+
+              {/* Matches for Listing */} 
+              <div className="border p-4 rounded-lg bg-white lg:w-1/2 flex-grow"> 
+                <h3 className="font-semibold text-lg mb-2">
+                  Matches for Listing
+                </h3>
+                {loading ? (
+                  <p>Loading matches...</p>
+                ) : error ? (
+                  <p className="text-red-500">Error: {error}</p>
+                ) : displayedMatches.length > 0 ? (
+                  <div className="grid grid-cols-1 gap-4 max-h-[600px] overflow-y-auto pr-2"> 
+                    {displayedMatches.map((match, index) => (
+                      <CardSection key={index} data={match} type="requirement" />
+                    ))}
+                  </div>
+                ) : (
+                  <p>No matches found.</p>
+                )}
+              </div>
+            </div>
+          )}
+          {selectedRequirementId && (
+            <div className="flex flex-col lg:flex-row gap-4"> 
+              {/* Selected Requirement Card */} 
+              {selectedRequirement && (
+                <div className="border p-4 rounded-lg bg-gray-50 h-fit lg:w-1/2"> 
+                  <h3 className="font-semibold text-lg mb-2">
+                    Selected Requirement {requirementMatchCounts[selectedRequirement.pk] !== undefined ? `(${requirementMatchCounts[selectedRequirement.pk]})` : ''}
+                  </h3>
+                  <CardSection data={selectedRequirement} type="requirement" />
+                </div>
+              )}
+
+              {/* Matches for Requirement */} 
+              <div className="border p-4 rounded-lg bg-white lg:w-1/2 flex-grow"> 
+                <h3 className="font-semibold text-lg mb-2">
+                  Matches for Requirement
+                </h3>
+                {loading ? (
+                  <p>Loading matches...</p>
+                ) : error ? (
+                  <p className="text-red-500">Error: {error}</p>
+                ) : displayedMatches.length > 0 ? (
+                  <div className="grid grid-cols-1 gap-4 max-h-[600px] overflow-y-auto pr-2"> 
+                    {displayedMatches.map((match, index) => (
+                      <CardSection key={index} data={match} type="listing" />
+                    ))}
+                  </div>
+                ) : (
+                  <p>No matches found.</p>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
-}
+};
 
 export default MatchingPage;
