@@ -1,0 +1,26 @@
+# Node
+node_modules/
+build/
+dist/
+.env
+.env.*
+.DS_Store
+*.log
+# OS
+Thumbs.db
+# Editor
+.vscode/
+.idea/
+# Test
+coverage/
+# Misc
+*.local
+*.cache
+*.bak
+
+# Supabase
+supabase/.temp/
+supabase/.output/
+
+# Local Netlify folder
+.netlify

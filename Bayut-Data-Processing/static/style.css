@@ -1,0 +1,120 @@
+body {
+    font-family: sans-serif;
+    line-height: 1.6;
+    margin: 20px;
+    background-color: #f4f4f4;
+}
+
+.container {
+    background: #fff;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+    max-width: 800px;
+    margin: auto;
+}
+
+h1 {
+    text-align: center;
+    color: #333;
+}
+
+.location-info,
+.search-section,
+#search-results,
+.status-section {
+    margin-bottom: 20px;
+    padding: 15px;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+}
+
+.location-info h2 {
+    margin-top: 0;
+    color: #555;
+}
+
+label {
+    display: block;
+    margin-bottom: 5px;
+    font-weight: bold;
+}
+
+input[type="text"] {
+    width: calc(100% - 22px);
+    padding: 10px;
+    margin-bottom: 10px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+}
+
+button {
+    padding: 10px 15px;
+    background-color: #007bff;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    margin-right: 5px;
+    transition: background-color 0.3s ease;
+}
+
+button:hover {
+    background-color: #0056b3;
+}
+
+#skip-button {
+    background-color: #ffc107;
+    color: #333;
+}
+
+#skip-button:hover {
+    background-color: #e0a800;
+}
+
+#save-button {
+    background-color: #28a745;
+}
+
+#save-button:hover {
+    background-color: #218838;
+}
+
+#results-list div {
+    border-bottom: 1px dashed #eee;
+    padding: 10px 0;
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+}
+
+#results-list div:last-child {
+    border-bottom: none;
+}
+
+#results-list div:hover {
+    background-color: #e9ecef;
+}
+
+#results-list div p {
+    margin: 5px 0;
+}
+
+#results-list button {
+    padding: 5px 10px;
+    font-size: 0.9em;
+    margin-top: 5px;
+    background-color: #17a2b8;
+}
+
+#results-list button:hover {
+    background-color: #117a8b;
+}
+
+#status-message {
+    font-weight: bold;
+    color: green;
+}
+
+#status-message.error {
+    color: red;
+}

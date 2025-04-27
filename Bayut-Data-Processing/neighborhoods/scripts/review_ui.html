@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neighborhood Mapping Review</title>
+    <!-- DataTables CSS -->
+    <link rel="stylesheet" type="text/css" href="https://cdn.datatables.net/1.11.5/css/jquery.dataTables.css">
+    <style>
+        body { font-family: sans-serif; margin: 20px; }
+        table { border-collapse: collapse; width: 100%; margin-top: 20px; font-size: 0.9em; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .status-accepted { background-color: #d4edda; }
+        .status-review { background-color: #fff3cd; }
+        .status-rejected { background-color: #f8d7da; }
+        .status-unknown { background-color: #e2e3e5; }
+        .confidence-high { color: green; font-weight: bold; }
+        .confidence-medium { color: orange; }
+        .confidence-low { color: red; }
+        .action-button { padding: 3px 8px; margin: 0 2px; cursor: pointer; border-radius: 3px; border: 1px solid #ccc; font-size: 0.9em; }
+        .accept-button { background-color: #28a745; color: white; border-color: #28a745; }
+        .reject-button { background-color: #dc3545; color: white; border-color: #dc3545; }
+        #saveButton { margin-top: 20px; padding: 10px 15px; cursor: pointer; }
+        td ul { margin: 0; padding-left: 20px; }
+    </style>
+</head>
+<body>
+
+<h1>Neighborhood Mapping Review</h1>
+<p>Comparing Bayut input names with Google Maps results.</p>
+<p>Output file: <code>../data/output/mapped_locations.json</code></p>
+
+<table id="resultsTable">
+    <thead>
+        <tr>
+            <th>Input Name</th>
+            <th>Google Name</th>
+            <th>Address</th>
+            <th>Method</th>
+            <th>Confidence</th>
+            <th>Status</th>
+            <th>Google Types</th>
+            <th>Distance (m)</th>
+            <th>Actions</th>
+        </tr>
+        <!-- Filter Row -->
+        <tr>
+            <th></th> <!-- Placeholder for Input Name Filter -->
+            <th></th> <!-- Placeholder for Google Name Filter -->
+            <th></th> <!-- Placeholder for Address Filter -->
+            <th></th> <!-- Placeholder for Method Filter -->
+            <th></th> <!-- Placeholder for Confidence Filter -->
+            <th></th> <!-- Placeholder for Status Filter -->
+            <th></th> <!-- Placeholder for Google Types Filter -->
+            <th></th> <!-- Placeholder for Distance Filter -->
+            <th></th> <!-- No filter for Actions -->
+        </tr>
+    </thead>
+    <tbody>
+        <!-- Data will be loaded here -->
+    </tbody>
+</table>
+
+<button id="saveButton">Download Updated JSON</button>
+
+<!-- jQuery -->
+<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<!-- DataTables JS -->
+<script type="text/javascript" charset="utf8" src="https://cdn.datatables.net/1.11.5/js/jquery.dataTables.js"></script>
+
+<script>
+    $(document).ready(function() {
+        const tableBody = $('#resultsTable tbody');
+
+        // Setup - add a text input/select to each SECOND header cell
+        $('#resultsTable thead tr:eq(1) th').each( function (i) {
+            var title = $('#resultsTable thead tr:eq(0) th').eq( $(this).index() ).text(); // Get title from first row
+            // Add input/select field based on column title
+            if (title === 'Status') {
+                $(this).html( '<select style="width: 90%;"><option value="">All</option><option value="accepted">accepted</option><option value="review">review</option><option value="rejected">rejected</option></select>' );
+            } else if (title === 'Method') {
+                $(this).html('<select style="width: 90%;"><option value="">All</option></select>'); // Placeholder, populated later
+            } else if (title === 'Google Types') {
+                $(this).html('<select style="width: 90%;"><option value="">All</option></select>'); // Placeholder, populated later
+            } else if (title !== '') { // Keep text input for others
+                $(this).html( '<input type="text" placeholder="Filter '+title+'" style="width: 90%;" />' );
+            }
+        } );
+
+        let allGoogleTypes = new Set(); // To collect unique types
+
+        // Store the original data and track changes
+        let fullMappingData = []; // Holds ALL data, including reviewed
+
+        fetch('../data/output/mapped_locations.json')
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status} while fetching ../data/output/mapped_locations.json`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                if (!Array.isArray(data)) {
+                    throw new Error('Loaded data is not an array.');
+                }
+
+                fullMappingData = data.map(item => ({ ...item, reviewed: item.reviewed || false })); // Store full data & ensure reviewed flag
+
+                // Filter data for initial display (only non-reviewed items)
+                let dataToDisplay = fullMappingData.filter(item => !item.reviewed);
+
+                // Clear previous rows if any
+                tableBody.empty();
+
+                if (dataToDisplay.length === 0) {
+                    tableBody.append('<tr><td colspan="9">No unreviewed items found.</td></tr>');
+                    // Still initialize DataTable for structure, even if empty
+                } else {
+                    dataToDisplay.forEach((item, displayIndex) => {
+                        // Find the original index in fullMappingData to store against the button
+                        const originalIndex = fullMappingData.findIndex(fullItem => fullItem.input_id === item.input_id); // Assuming input_id is unique
+
+                        // Collect unique Google Types
+                        (item.google_types || []).forEach(type => allGoogleTypes.add(type));
+
+                        const row = tableBody[0].insertRow();
+                        row.className = `status-${item.match_status || 'unknown'}`; // Add class for styling
+
+                        // Determine confidence color
+                        let confidenceClass = 'confidence-low';
+                        if (item.confidence >= 0.9) {
+                            confidenceClass = 'confidence-high';
+                        } else if (item.confidence >= 0.7) {
+                            confidenceClass = 'confidence-medium';
+                        }
+
+                        // Format Google Types
+                        let typesHtml = 'N/A';
+                        if (item.google_types && Array.isArray(item.google_types)) {
+                            typesHtml = '<ul>' + item.google_types.map(type => `<li>${type}</li>`).join('') + '</ul>';
+                        }
+
+                        // Format Distance
+                        let distanceHtml = 'N/A';
+                        if (item.distance_meters !== null && item.distance_meters !== undefined) {
+                            distanceHtml = item.distance_meters.toFixed(1);
+                        }
+
+                        row.insertCell().textContent = item.input_name || 'N/A';
+                        row.insertCell().textContent = item.name || 'N/A';
+                        row.insertCell().textContent = item.address || 'N/A';
+                        row.insertCell().textContent = item.method || 'N/A';
+                        row.insertCell().innerHTML = `<span class="${confidenceClass}">${item.confidence !== null ? item.confidence.toFixed(3) : 'N/A'}</span>`;
+                        row.insertCell().textContent = item.match_status || 'N/A';
+                        row.insertCell().innerHTML = typesHtml;
+                        row.insertCell().textContent = distanceHtml; // Add distance data
+
+                        // Add Action Buttons
+                        const actionsCell = row.insertCell();
+                        // Store ORIGINAL index in data attribute for updating fullMappingData
+                        actionsCell.innerHTML = `
+                            <button class="action-button accept-button" data-original-index="${originalIndex}">Accept</button>
+                            <button class="action-button reject-button" data-original-index="${originalIndex}">Reject</button>
+                        `;
+                    });
+
+                    // Populate Google Types Filter
+                    const typesFilterSelect = $('#resultsTable thead tr:eq(1) th:eq(6) select'); // 7th column (index 6) in second header row
+                    allGoogleTypes.forEach(type => {
+                        typesFilterSelect.append($('<option>', {
+                            value: type,
+                            text: type
+                        }));
+                    });
+
+                    // Populate Method Filter
+                    const methodFilterSelect = $('#resultsTable thead tr:eq(1) th:eq(3) select'); // 4th column (index 3) in second header row
+                    const allMethods = new Set(dataToDisplay.map(item => item.method));
+                    allMethods.forEach(method => {
+                        methodFilterSelect.append($('<option>', {
+                            value: method,
+                            text: method
+                        }));
+                    });
+                }
+
+                // Initialize DataTables AFTER data is loaded
+                var table = $('#resultsTable').DataTable({
+                    "orderCellsTop": true, // Process sorting/filtering actions on the top-most visible row
+                    "columnDefs": [
+                        { "orderable": false, "targets": 8 } // Disable sorting for Actions column (index 8)
+                     ],
+                    "fixedHeader": true, // Keeps header visible during scroll
+                    initComplete: function () {
+                        // Apply the search
+                        this.api().columns().every( function () {
+                            // 'this' refers to the column API object here, use it directly
+                            var column = this;
+
+                            // Find the correct filter cell in the second header row using the column index
+                            var filterCell = $('#resultsTable thead tr:eq(1) th').eq(column.index());
+
+                            // Handle text inputs
+                            $( 'input', filterCell ).on( 'keyup change clear', function () {
+                                if ( column.search() !== this.value ) {
+                                    column
+                                        .search( this.value )
+                                        .draw();
+                                }
+                            } );
+
+                            // Handle select dropdowns
+                            $( 'select', filterCell ).on( 'change', function () {
+                                var val = $(this).val(); // Get selected value
+                                var escapedVal = $.fn.dataTable.util.escapeRegex(val);
+
+                                // Use regex for exact match for Status (col 5) and Method (col 3)
+                                // Use plain search (contains) for Google Types (col 6)
+                                let useRegex = (column.index() === 3 || column.index() === 5);
+                                let searchTerm = useRegex ? '^' + escapedVal + '$' : escapedVal;
+
+                                column
+                                    .search( val ? searchTerm : '', useRegex, false ) // Pass regex flag
+                                    .draw();
+                            } );
+                        } );
+                    }
+                });
+            })
+            .catch(error => {
+                console.error('Error loading or processing mapping data:', error);
+                tableBody.html(`<tr><td colspan="9">Error loading data: ${error.message}. Check console and file path.</td></tr>`);
+            });
+
+        // Event listener for action buttons (using delegation)
+        $('#resultsTable tbody').on('click', '.action-button', function() {
+            console.log("Action button clicked:", this); // Log the button element
+            const originalIndexStr = $(this).data('original-index'); // Get as string first
+            console.log("data-original-index attribute:", originalIndexStr);
+
+            // Try parsing the index explicitly
+            const originalIndex = parseInt(originalIndexStr, 10);
+            console.log("Parsed originalIndex:", originalIndex);
+
+            // Check if index is a valid number
+            if (isNaN(originalIndex) || originalIndex < 0) {
+                 console.error("Invalid originalIndex obtained from button:", originalIndexStr);
+                 return; // Stop if index is invalid
+            }
+
+            const isAccept = $(this).hasClass('accept-button');
+            const newStatus = isAccept ? 'accepted' : 'rejected';
+
+            console.log(`Attempting action: Original Index=${originalIndex}, New Status=${newStatus}`);
+
+            // Check if the data exists at the index and index is within bounds
+            if (originalIndex < fullMappingData.length && fullMappingData[originalIndex]) {
+                 console.log("Data found at index:", fullMappingData[originalIndex]);
+                  // 1. Update the underlying data array
+                  fullMappingData[originalIndex].match_status = newStatus;
+                  fullMappingData[originalIndex].reviewed = true; // Mark as reviewed
+
+                  // 2. Remove the row from the DataTable view
+                  const table = $('#resultsTable').DataTable();
+                  const rowNode = $(this).closest('tr');
+
+                 // Add log before removing
+                 console.log("Attempting to remove row:", rowNode);
+                 try {
+                     table.row(rowNode).remove().draw(false); // Remove row and redraw table without resetting page
+
+                    console.log(`Successfully updated fullMappingData[${originalIndex}]. Status: ${newStatus}, Reviewed: true. Row removed.`);
+                 } catch (e) {
+                    console.error("Error removing row from DataTable:", e);
+                 }
+
+            } else {
+                console.error(`Data not found or index out of bounds for original index ${originalIndex}. Array length: ${fullMappingData.length}`);
+            }
+        });
+
+         // Event listener for the Save/Download button
+        $('#saveButton').on('click', function() {
+           try {
+                const updatedJson = JSON.stringify(fullMappingData, null, 2); // Save the full data
+                 const blob = new Blob([updatedJson], { type: 'application/json' });
+                 const url = URL.createObjectURL(blob);
+
+                 const a = document.createElement('a');
+                 a.href = url;
+                 a.download = 'mapped_locations_updated.json'; // Suggest a slightly different name
+                 document.body.appendChild(a); // Required for Firefox
+                 a.click();
+                 a.remove(); // Clean up
+                 URL.revokeObjectURL(url);
+
+                 alert('JSON file generated for download. Please replace the existing mapped_locations.json with this file.');
+                 console.log('Updated JSON prepared for download.');
+
+             } catch (error) {
+                 console.error('Error generating JSON for download:', error);
+                 alert('Error generating JSON file. Check console for details.');
+             }
+          });
+    });
+</script>
+
+</body>
+</html>
