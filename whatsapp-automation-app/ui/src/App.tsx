@@ -13,9 +13,28 @@ import dayjs, { Dayjs } from 'dayjs';
 import CsvUploadComponent, { type CsvRow } from './components/CsvUploadComponent';
 import MessageTableComponent from './components/MessageTableComponent';
 import SettingsComponent from './components/SettingsComponent';
+import JobReportDisplay from './components/JobReportDisplay';
 
 // Backend API endpoint
 const API_ENDPOINT = 'http://localhost:3001/api/submit-job';
+
+// Interfaces from backend (message-sender.ts)
+export interface MessageReportItem {
+  phoneNumber: string;
+  messageBodySnippet: string;
+  status: 'Sent' | 'Failed';
+  error?: string;
+  timestamp: string;
+}
+
+export interface JobReport {
+  summary: {
+    successCount: number;
+    failureCount: number;
+    totalMessages: number;
+  };
+  details: MessageReportItem[];
+}
 
 // A simple dark theme, you can customize this later
 const darkTheme = createTheme({
@@ -42,13 +61,15 @@ function App() {
   const [instanceName, setInstanceName] = useState<string>(DEFAULT_INSTANCE_NAME);
   
   // State for API call status
-  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
   const [apiStatusMessage, setApiStatusMessage] = useState<string>('');
+  const [jobReport, setJobReport] = useState<JobReport | null>(null);
 
   const handleDataParsed = (data: CsvRow[], fileName: string) => {
     setCsvData(data);
     setUploadedFileName(fileName);
     setApiStatusMessage(''); // Clear status on new CSV upload
+    setJobReport(null); // Clear previous report on new CSV upload
   };
 
   // Handlers for SettingsComponent props
@@ -73,8 +94,10 @@ function App() {
     setInstanceName(value);
   };
 
-  const handleSubmitJob = async () => {
+  const handleSubmitJob = async (runNow: boolean) => {
     setApiStatusMessage('');
+    setJobReport(null); // Clear previous report before new submission
+
     if (csvData.length === 0) {
       setApiStatusMessage('Please upload a CSV file with messages.');
       return;
@@ -95,25 +118,32 @@ function App() {
       setApiStatusMessage('Minimum delay cannot be greater than maximum delay.');
       return;
     }
-    if (scheduleDateTime && !scheduleDateTime.isValid()) {
-      setApiStatusMessage('Invalid schedule date/time.');
-      return;
-    }
-    if (scheduleDateTime && scheduleDateTime.isBefore(dayjs())) {
-      setApiStatusMessage('Cannot schedule a job in the past.');
-      return;
+
+    let effectiveScheduleDateTime: string | null = null;
+
+    if (!runNow) { // Validations for scheduled job only
+      if (!scheduleDateTime || !scheduleDateTime.isValid()) {
+        setApiStatusMessage('Invalid schedule date/time for a scheduled job.');
+        return;
+      }
+      if (scheduleDateTime.isBefore(dayjs())) {
+        setApiStatusMessage('Cannot schedule a job in the past.');
+        return;
+      }
+      effectiveScheduleDateTime = scheduleDateTime.toISOString();
     }
 
-    setIsSubmitting(true);
+    setIsLoading(true);
     setApiStatusMessage('Submitting job...');
 
     const payload = {
       csvData: csvData.map(row => ({ phoneNumber: row.phoneNumber, messageBody: row.messageBody })),
       minDelay,
       maxDelay,
-      scheduleDateTime: scheduleDateTime ? scheduleDateTime.toISOString() : null,
+      scheduleDateTime: effectiveScheduleDateTime, // Will be null if runNow is true
       apiKey,
       instanceName,
+      runNow, // Add the runNow flag to the payload
     };
 
     try {
@@ -128,22 +158,28 @@ function App() {
       const responseData = await response.json();
 
       if (response.ok) {
-        setApiStatusMessage(responseData.message || 'Job submitted successfully!');
-        // Optionally clear CSV data after successful submission
-        // setCsvData([]);
-        // setUploadedFileName(null);
+        setApiStatusMessage(responseData.message || 'Job request processed!');
+        if (response.status === 200 && responseData.report) {
+          setJobReport(responseData.report as JobReport);
+        } else {
+          // For 202 (Accepted/Scheduled) or if report is missing for some reason on 200
+          setJobReport(null);
+        }
       } else {
         setApiStatusMessage(`Error: ${responseData.message || response.statusText || 'Unknown error'}`);
+        setJobReport(null);
       }
     } catch (error) {
       console.error('Failed to submit job:', error);
       setApiStatusMessage(`Network error: Failed to connect to the server. Is it running at ${API_ENDPOINT}?`);
+      setJobReport(null);
     } finally {
-      setIsSubmitting(false);
+      setIsLoading(false);
     }
   };
   
-  const canSubmit = csvData.length > 0 && apiKey.trim() !== '' && instanceName.trim() !== '';
+  const canSubmitGenerally = csvData.length > 0 && apiKey.trim() !== '' && instanceName.trim() !== '';
+  const canSchedule = canSubmitGenerally && scheduleDateTime && scheduleDateTime.isValid() && scheduleDateTime.isAfter(dayjs());
 
   return (
     <ThemeProvider theme={darkTheme}>
@@ -178,33 +214,35 @@ function App() {
             onInstanceNameChange={handleInstanceNameChange}
           />
           
-          <Box sx={{ mt: 3, mb: 2, textAlign: 'center' }}>
+          <Box sx={{ mt: 3, mb: 2, textAlign: 'center', display: 'flex', justifyContent: 'center', gap: 2 }}>
+            <Button 
+              variant="contained" 
+              color="secondary" 
+              onClick={() => handleSubmitJob(true)} 
+              disabled={isLoading || !canSubmitGenerally}
+              size="large"
+            >
+              {isLoading ? 'Processing...' : 'Run Job Now'}
+            </Button>
             <Button 
               variant="contained" 
               color="primary" 
-              onClick={handleSubmitJob} 
-              disabled={isSubmitting || !canSubmit}
+              onClick={() => handleSubmitJob(false)} 
+              disabled={isLoading || !canSchedule}
               size="large"
             >
-              {isSubmitting ? 'Submitting...' : 'Submit Job to Backend'}
+              {isLoading ? 'Processing...' : 'Schedule Job'}
             </Button>
           </Box>
 
           {apiStatusMessage && (
-            <Typography 
-              variant="body1" 
-              sx={{ 
-                mt: 2, 
-                textAlign: 'center', 
-                color: apiStatusMessage.toLowerCase().includes('error') || apiStatusMessage.toLowerCase().includes('failed') ? 'error.main' : 'success.main', 
-                padding: 1,
-                borderRadius: 1,
-                backgroundColor: apiStatusMessage.toLowerCase().includes('error') || apiStatusMessage.toLowerCase().includes('failed') ? 'rgba(211, 47, 47, 0.1)' : 'rgba(46, 125, 50, 0.1)'
-              }}
-            >
+            <Typography color={jobReport || (apiStatusMessage.toLowerCase().includes('scheduled') && !apiStatusMessage.toLowerCase().includes('error')) ? "text.secondary" : "error"} sx={{ mt: 2, textAlign: 'center' }}>
               {apiStatusMessage}
             </Typography>
           )}
+
+          {jobReport && <JobReportDisplay report={jobReport} />}
+
         </Box>
       </Container>
     </ThemeProvider>

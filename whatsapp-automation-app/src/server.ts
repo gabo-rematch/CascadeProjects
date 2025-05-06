@@ -1,7 +1,7 @@
 // /Users/gabrielgarcialeyva/CascadeProjects/whatsapp-automation-app/src/server.ts
 import express, { Request, Response } from 'express';
 import cors from 'cors';
-import { MessageSenderService, Message as CsvRowData } from './modules/message-sender'; // CsvRowData from message-sender
+import { MessageSenderService, Message, JobReport } from './modules/message-sender'; // Updated import
 import { AppLogger } from './modules/logger'; // Corrected path
 import { EvolutionApiConfig } from '../config/evolution-api.config'; // Corrected path
 
@@ -9,12 +9,13 @@ const logger = new AppLogger('Server'); // Instantiate logger
 
 // Define a type for the expected CSV row structure from the frontend
 interface SubmitJobPayload {
-  csvData: CsvRowData[];
+  csvData: Message[];
   minDelay: number;
   maxDelay: number;
   scheduleDateTime: string | null; // ISO string or null
   instanceName: string; // Added instanceName
   apiKey: string; // Added apiKey
+  runNow: boolean; // Added runNow flag
 }
 
 const app = express();
@@ -43,6 +44,7 @@ app.post('/api/submit-job', async (req: Request, res: Response): Promise<void> =
       scheduleDateTime,
       instanceName,
       apiKey,
+      runNow, // Destructure runNow
     } = req.body as SubmitJobPayload;
 
     // Basic validation
@@ -68,43 +70,66 @@ app.post('/api/submit-job', async (req: Request, res: Response): Promise<void> =
     }
     
     // Log received data
-    logger.log(`Job submission received:\n  Instance: ${instanceName}\n  Messages: ${csvData.length}\n  Delay: ${minDelay}-${maxDelay}ms\n  Schedule: ${scheduleDateTime || 'Immediate'}`);
+    logger.log(`Job submission received:\n  Instance: ${instanceName}\n  Messages: ${csvData.length}\n  Delay: ${minDelay}-${maxDelay}ms\n  Schedule: ${scheduleDateTime || 'Not specified'}\n  Run Now: ${runNow}`);
 
-    // TODO: Implement scheduling logic if scheduleDateTime is provided
+    const executeJob = async (): Promise<JobReport | undefined> => {
+      logger.log(`Processing job for instance: ${instanceName}`);
+      const evolutionConfig: EvolutionApiConfig = { EVOLUTION_API_URL: process.env.EVOLUTION_API_URL || 'http://localhost:8081', EVOLUTION_API_KEY: apiKey };
+      const messageSender = new MessageSenderService(instanceName, evolutionConfig, { minDelay, maxDelay });
+      try {
+        const report = await messageSender.processMessages(csvData);
+        logger.log(`Job processing completed for instance: ${instanceName}. Success: ${report.summary.successCount}, Failures: ${report.summary.failureCount}`);
+        return report;
+      } catch (jobError) {
+        logger.error(`Error during job processing for instance ${instanceName}:`, jobError);
+        return undefined; // Indicate failure to process
+      }
+    };
+
+    if (runNow) {
+      logger.log('"Run Now" flag is true. Processing job immediately.');
+      const report = await executeJob(); 
+      if (report) {
+        res.status(200).json({ message: 'Job processed immediately.', report });
+      } else {
+        res.status(500).json({ message: 'Job processing failed immediately. Check server logs.'});
+      }
+      return;
+    }
+
+    // If not runNow, proceed with scheduling logic or immediate execution if schedule is invalid/past
     if (scheduleDateTime) {
       const scheduleTime = new Date(scheduleDateTime);
       const now = new Date();
-      if (scheduleTime <= now) {
-        logger.warn('Scheduled time is in the past. Processing immediately.');
-      } else {
+
+      if (scheduleTime > now) {
         const delayUntilScheduled = scheduleTime.getTime() - now.getTime();
         logger.log(`Job scheduled for ${scheduleDateTime}. Waiting for ${delayUntilScheduled / 1000} seconds.`);
-        setTimeout(async () => {
-          logger.log(`Executing scheduled job for instance: ${instanceName}`);
-          const evolutionConfig: EvolutionApiConfig = { EVOLUTION_API_URL: process.env.EVOLUTION_API_URL || 'http://localhost:8081', EVOLUTION_API_KEY: apiKey }; // Added fallback for URL
-          const messageSender = new MessageSenderService(instanceName, evolutionConfig, { minDelay, maxDelay });
-          await messageSender.processMessages(csvData);
+        setTimeout(async () => { // Make the setTimeout callback async to log report details
+            logger.log(`Executing scheduled job for instance: ${instanceName} at ${new Date().toISOString()}`);
+            const report = await executeJob();
+            if (report) {
+                logger.log(`Scheduled job for ${instanceName} completed. Success: ${report.summary.successCount}, Failures: ${report.summary.failureCount}`);
+            } else {
+                logger.error(`Scheduled job for ${instanceName} failed to produce a report.`);
+            }
         }, delayUntilScheduled);
-
         res.status(202).json({ message: `Job scheduled for ${scheduleDateTime}. Messages will be processed then.` });
         return;
+      } else {
+        logger.warn('Scheduled time is in the past or invalid. Processing immediately.');
       }
+    } else {
+      logger.log('No scheduleDateTime provided and runNow is false. Processing job immediately.');
     }
     
-    // If not scheduled or scheduled for the past, process immediately
-    logger.log(`Processing job immediately for instance: ${instanceName}`);
-    const evolutionConfig: EvolutionApiConfig = { EVOLUTION_API_URL: process.env.EVOLUTION_API_URL || 'http://localhost:8081', EVOLUTION_API_KEY: apiKey }; // Added fallback for URL
-    const messageSender = new MessageSenderService(instanceName, evolutionConfig, { minDelay, maxDelay });
-    
-    messageSender.processMessages(csvData)
-      .then(() => {
-        logger.log(`Asynchronous job processing completed for instance: ${instanceName}`);
-      })
-      .catch(error => {
-        logger.error(`Error during asynchronous job processing for instance ${instanceName}:`, error);
-      });
-
-    res.status(202).json({ message: 'Job accepted and is being processed. Check server logs for status.' });
+    // Fallback: Process immediately if not runNow and not scheduled for future
+    const report = await executeJob(); 
+    if (report) {
+        res.status(200).json({ message: 'Job processed (no valid future schedule or runNow was false).', report });
+    } else {
+        res.status(500).json({ message: 'Job processing failed (no valid future schedule or runNow was false). Check server logs.'});
+    }
 
   } catch (error) {
     logger.error('Error processing /api/submit-job:', error);

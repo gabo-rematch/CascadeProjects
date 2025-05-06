@@ -8,6 +8,23 @@ export interface Message {
   messageBody: string;
 }
 
+export interface MessageReportItem {
+  phoneNumber: string;
+  messageBodySnippet: string; // Store a snippet to avoid large payloads
+  status: 'Sent' | 'Failed';
+  error?: string; // Optional error details if failed
+  timestamp: string;
+}
+
+export interface JobReport {
+  summary: {
+    successCount: number;
+    failureCount: number;
+    totalMessages: number;
+  };
+  details: MessageReportItem[];
+}
+
 export class MessageSenderService {
   private readonly logger = new AppLogger(MessageSenderService.name);
   private readonly instanceName: string;
@@ -47,7 +64,7 @@ export class MessageSenderService {
     this.logger.log(`MessageSenderService initialized for instance: ${this.instanceName} with delays: ${this.minDelayMs}-${this.maxDelayMs}ms`);
   }
 
-  private async sendMessage(phoneNumber: string, messageBody: string): Promise<boolean> {
+  private async sendMessage(phoneNumber: string, messageBody: string): Promise<{ success: boolean; errorDetail?: string }> {
     this.logger.log(`Attempting to send message to ${phoneNumber}. Original Raw Body: [${messageBody}]`); 
     
     const fullPhoneNumber = `${phoneNumber}@s.whatsapp.net`;
@@ -70,41 +87,73 @@ export class MessageSenderService {
       const response = await axios.post(endpoint, payload, { headers });
       if (response.status >= 200 && response.status < 300) {
         this.logger.log(`Message sent successfully to ${phoneNumber}. Response: ${response.status}`);
-        return true;
+        return { success: true };
       } else {
-        this.logger.warn(`API request to send message to ${phoneNumber} failed with status ${response.status}. Response: ${JSON.stringify(response.data)}`);
-        return false;
+        const errorDetail = `API Error: Status ${response.status} - ${JSON.stringify(response.data)}`;
+        this.logger.warn(`API request to send message to ${phoneNumber} failed. ${errorDetail}`);
+        return { success: false, errorDetail };
       }
     } catch (error) {
-      this.logger.error(`Error sending message to ${phoneNumber} via Evolution API:`, error);
-      if (axios.isAxiosError(error) && error.response) {
-        this.logger.error(`API Error Response Data: ${JSON.stringify(error.response.data)}`);
+      let errorDetail = 'Unknown error during send.';
+      if (axios.isAxiosError(error)) {
+        errorDetail = error.message;
+        if (error.response) {
+          errorDetail += ` - Data: ${JSON.stringify(error.response.data)}`;
+          this.logger.error(`API Error Response Data: ${JSON.stringify(error.response.data)}`);
+        }
       }
-      return false;
+      this.logger.error(`Error sending message to ${phoneNumber} via Evolution API: ${errorDetail}`, error);
+      return { success: false, errorDetail };
     }
   }
 
-  async processMessages(messages: Message[]): Promise<{ successCount: number; failureCount: number }> {
+  async processMessages(messages: Message[]): Promise<JobReport> {
     let successCount = 0;
     let failureCount = 0;
+    const reportDetails: MessageReportItem[] = [];
 
     this.logger.log(`Starting to process ${messages.length} messages for instance ${this.instanceName}.`);
 
     for (const [index, message] of messages.entries()) {
       this.logger.log(`Processing message ${index + 1}/${messages.length}: To ${message.phoneNumber}`);
+      const messageBodySnippet = message.messageBody.length > 50 ? `${message.messageBody.substring(0, 47)}...` : message.messageBody;
+      let reportItem: MessageReportItem;
       try {
-        const success = await this.sendMessage(message.phoneNumber, message.messageBody);
-        if (success) {
+        const result = await this.sendMessage(message.phoneNumber, message.messageBody);
+        if (result.success) {
           this.logger.log(`Successfully sent message to ${message.phoneNumber}`);
           successCount++;
+          reportItem = {
+            phoneNumber: message.phoneNumber,
+            messageBodySnippet,
+            status: 'Sent',
+            timestamp: new Date().toISOString(),
+          };
         } else {
           failureCount++;
+          reportItem = {
+            phoneNumber: message.phoneNumber,
+            messageBodySnippet,
+            status: 'Failed',
+            error: result.errorDetail || 'Failed to send',
+            timestamp: new Date().toISOString(),
+          };
         }
       } catch (error) {
-        // Error already logged in sendMessage
+        // This catch block might be redundant if sendMessage handles all its errors and returns a result object.
+        // However, for unexpected errors in the loop itself:
+        this.logger.error(`Unexpected error processing message for ${message.phoneNumber}:`, error);
         failureCount++;
-        // Optionally, add to a list of failed messages for retry or reporting
+        reportItem = {
+          phoneNumber: message.phoneNumber,
+          messageBodySnippet,
+          status: 'Failed',
+          error: error instanceof Error ? error.message : 'Unknown processing error',
+          timestamp: new Date().toISOString(),
+        };
       }
+      reportDetails.push(reportItem);
+
       if (index < messages.length - 1) {
         const delay = DelayUtil.getRandomDelayInRange(this.minDelayMs, this.maxDelayMs);
         this.logger.log(`Waiting for ${delay / 1000} seconds before next message...`);
@@ -113,6 +162,14 @@ export class MessageSenderService {
     }
     this.logger.log(`Finished processing all messages for instance ${this.instanceName}.`);
     this.logger.log(`Summary for instance ${this.instanceName}: Successes = ${successCount}, Failures = ${failureCount}`);
-    return { successCount, failureCount };
+    
+    return {
+      summary: {
+        successCount,
+        failureCount,
+        totalMessages: messages.length,
+      },
+      details: reportDetails,
+    };
   }
 }
