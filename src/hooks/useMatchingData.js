@@ -80,11 +80,12 @@ export const usePropertyData = (transactionTypeFilter) => {
  * Custom hook to fetch match counts for all listings and requirements.
  * @param {string} selectedAlgorithm - The ID of the matching algorithm.
  * @param {string} transactionTypeFilter - 'all', 'sale', or 'rent'.
+ * @param {object} customCriteria - Custom criteria for the 'custom' algorithm.
  * @returns {object} - Listing counts, requirement counts, loading state, error state.
  */
-export const useMatchCounts = (selectedAlgorithm, transactionTypeFilter) => {
-  const [listingMatchCounts, setListingMatchCounts] = useState({});
-  const [requirementMatchCounts, setRequirementMatchCounts] = useState({});
+export const useMatchCounts = (selectedAlgorithm, transactionTypeFilter, customCriteria) => {
+  const [listingMatchCounts, setListingMatchCounts] = useState(null);
+  const [requirementMatchCounts, setRequirementMatchCounts] = useState(null);
   const [isLoadingMatchCounts, setIsLoadingMatchCounts] = useState(false);
   const [errorMatchCounts, setErrorMatchCounts] = useState(null);
   const supabase = getSupabaseClient(); // Get Supabase client
@@ -97,20 +98,36 @@ export const useMatchCounts = (selectedAlgorithm, transactionTypeFilter) => {
     setRequirementMatchCounts({});
 
     try {
-      // Prepare base parameters
-      let baseParams = { p_match_algorithm: selectedAlgorithm };
-      if (transactionTypeFilter !== 'all') {
-        baseParams = { ...baseParams, p_transaction_filter: transactionTypeFilter };
+      // Define the two RPC calls, explicitly passing all required params
+      const baseParams = {
+        p_source_pk: null, // Pass null when fetching counts for all listings
+        p_source_type: 'listing',
+        p_match_algorithm: selectedAlgorithm, // Pass required param
+        p_transaction_filter: transactionTypeFilter.toUpperCase() === 'ALL' ? 'All' : transactionTypeFilter.charAt(0).toUpperCase() + transactionTypeFilter.slice(1) // Ensure correct case
+      };
+
+      let rpcParams;
+
+      if (selectedAlgorithm === 'custom') {
+        // For 'custom', pass the criteria object
+        rpcParams = {
+          ...baseParams,
+          p_custom_criteria: customCriteria, // Pass the criteria object
+        };
+      } else {
+        // For other algorithms, pass null for criteria
+        rpcParams = {
+          ...baseParams,
+          p_custom_criteria: null, // Pass null
+        };
       }
 
-      // Define the two RPC calls
-      const fetchListingCounts = supabase.rpc('get_match_counts', {
-        ...baseParams,
-        p_source_type: 'listing'
-      });
+      const fetchListingCounts = supabase.rpc('get_match_counts', rpcParams);
       const fetchRequirementCounts = supabase.rpc('get_match_counts', {
-        ...baseParams,
-        p_source_type: 'requirement'
+        p_source_pk: null, // Pass null when fetching counts for all requirements
+        p_source_type: 'requirement',
+        p_match_algorithm: selectedAlgorithm, // Pass required param
+        p_transaction_filter: transactionTypeFilter.toUpperCase() === 'ALL' ? 'All' : transactionTypeFilter.charAt(0).toUpperCase() + transactionTypeFilter.slice(1) // Ensure correct case
       });
 
       // Execute calls concurrently
@@ -146,7 +163,7 @@ export const useMatchCounts = (selectedAlgorithm, transactionTypeFilter) => {
     } finally {
       setIsLoadingMatchCounts(false);
     }
-  }, [supabase, selectedAlgorithm, transactionTypeFilter]); // Add dependencies
+  }, [supabase, selectedAlgorithm, transactionTypeFilter, customCriteria]); // Add dependencies
 
   // Effect to trigger fetch when dependencies change
   useEffect(() => {
@@ -166,9 +183,10 @@ export const useMatchCounts = (selectedAlgorithm, transactionTypeFilter) => {
  * Custom hook to fetch matches for a specific source item.
  * @param {string} selectedAlgorithm - The ID of the matching algorithm.
  * @param {string} transactionTypeFilter - 'all', 'sale', or 'rent'.
+ * @param {object} customCriteria - Custom criteria for the 'custom' algorithm.
  * @returns {object} - Matches, loading state, error state, and fetch function.
  */
-export const useMatches = (selectedAlgorithm, transactionTypeFilter) => {
+export const useMatches = (selectedAlgorithm, transactionTypeFilter, customCriteria) => {
   const [matches, setMatches] = useState([]);
   const [isLoadingMatches, setIsLoadingMatches] = useState(false);
   const [errorMatches, setErrorMatches] = useState(null);
@@ -185,12 +203,34 @@ export const useMatches = (selectedAlgorithm, transactionTypeFilter) => {
     setIsLoadingMatches(true);
     setErrorMatches(null);
     try {
-      const { data, error } = await supabase.rpc('get_matches', {
+      // Prepare base parameters
+      const baseParams = {
         p_source_pk: parseInt(sourceId),
         p_source_type: sourceType,
         p_match_algorithm: selectedAlgorithm,
-        p_transaction_filter: transactionTypeFilter
-      });
+        p_transaction_filter: transactionTypeFilter.toUpperCase() === 'ALL' ? 'All' : transactionTypeFilter.charAt(0).toUpperCase() + transactionTypeFilter.slice(1) // Ensure correct case
+      };
+
+      let rpcParams;
+
+      if (selectedAlgorithm === 'custom') {
+        // For 'custom', pass the criteria object
+        rpcParams = {
+          ...baseParams,
+          p_custom_criteria: customCriteria, // Pass the criteria object
+        };
+      } else {
+        // For other algorithms, pass null for criteria
+        rpcParams = {
+          ...baseParams,
+          p_custom_criteria: null, // Pass null
+        };
+      }
+
+      const { data, error } = await supabase.rpc('get_matches', rpcParams);
+
+      console.log(`[useMatches] Raw data for ${sourceType} ${sourceId}:`, data);
+      console.log(`[useMatches] Raw error for ${sourceType} ${sourceId}:`, error);
 
       if (error) throw error;
       setMatches(data || []);
@@ -201,7 +241,7 @@ export const useMatches = (selectedAlgorithm, transactionTypeFilter) => {
     } finally {
       setIsLoadingMatches(false);
     }
-  }, [supabase, selectedAlgorithm, transactionTypeFilter]); // Dependencies for the fetch logic
+  }, [supabase, selectedAlgorithm, transactionTypeFilter, customCriteria]); // Dependencies for the fetch logic
 
   // Function to clear matches manually if needed (e.g., when selection is cleared)
   const clearMatches = useCallback(() => {

@@ -1,130 +1,118 @@
 import axios from 'axios';
 import { AppLogger } from './logger';
-import { MessageData } from './csv-provider';
 import { DelayUtil } from './delay-utils';
+import { EvolutionApiConfig } from '../../config/evolution-api.config';
+
+export interface Message {
+  phoneNumber: string;
+  messageBody: string;
+}
 
 export class MessageSenderService {
   private readonly logger = new AppLogger(MessageSenderService.name);
+  private readonly instanceName: string;
+  private readonly apiKey: string;
   private readonly evolutionApiUrl: string;
-  private readonly evolutionApiInstanceName: string;
-  private readonly evolutionApiKey: string;
   private readonly minDelayMs: number;
   private readonly maxDelayMs: number;
 
-  constructor() {
-    this.evolutionApiUrl = process.env.EVOLUTION_API_URL || '';
-    this.evolutionApiInstanceName = process.env.EVOLUTION_API_INSTANCE_NAME || '';
-    this.evolutionApiKey = process.env.EVOLUTION_API_KEY || '';
-    this.minDelayMs = parseInt(process.env.MIN_DELAY_MS || '2000', 10);
-    this.maxDelayMs = parseInt(process.env.MAX_DELAY_MS || '10000', 10);
+  constructor(
+    instanceName: string,
+    config: EvolutionApiConfig,
+    delaySettings?: { minDelay?: number; maxDelay?: number }
+  ) {
+    this.instanceName = instanceName;
+    this.apiKey = config.EVOLUTION_API_KEY;
+    this.evolutionApiUrl = config.EVOLUTION_API_URL;
+    this.minDelayMs = delaySettings?.minDelay ?? 2000; // Default 2s
+    this.maxDelayMs = delaySettings?.maxDelay ?? 10000; // Default 10s
+
+    if (this.minDelayMs < 0) this.minDelayMs = 0;
+    if (this.maxDelayMs < 0) this.maxDelayMs = 0;
+
+    if (this.minDelayMs > this.maxDelayMs) {
+      this.logger.warn(`Min delay (${this.minDelayMs}ms) is greater than max delay (${this.maxDelayMs}ms). Using max delay as min delay.`);
+      this.minDelayMs = this.maxDelayMs;
+    }
 
     if (!this.evolutionApiUrl) {
-      this.logger.error('EVOLUTION_API_URL is not set in environment variables.');
-      throw new Error('EVOLUTION_API_URL is required.');
+      this.logger.error('EVOLUTION_API_URL is not set in the provided config.');
     }
-    if (!this.evolutionApiInstanceName) {
-      this.logger.error('EVOLUTION_API_INSTANCE_NAME is not set in environment variables.');
-      throw new Error('EVOLUTION_API_INSTANCE_NAME is required.');
+    if (!this.instanceName) {
+      this.logger.error('Instance name is not set.');
     }
-    if (!this.evolutionApiKey) {
-      this.logger.error('EVOLUTION_API_KEY is not set in environment variables.');
-      throw new Error('EVOLUTION_API_KEY is required.');
+    if (!this.apiKey) {
+      this.logger.error('EVOLUTION_API_KEY is not set in the provided config.');
     }
-
-    this.logger.log(`MessageSenderService initialized for Evolution API.`);
-    this.logger.log(`Evolution API URL: ${this.evolutionApiUrl}`);
-    this.logger.log(`Evolution API Instance: ${this.evolutionApiInstanceName}`);
-    this.logger.log(`Delay range: ${this.minDelayMs}ms - ${this.maxDelayMs}ms`);
+    this.logger.log(`MessageSenderService initialized for instance: ${this.instanceName} with delays: ${this.minDelayMs}-${this.maxDelayMs}ms`);
   }
 
-  public async sendMessage(data: MessageData): Promise<boolean> {
-    this.logger.log(`Attempting to send message to ${data.phoneNumber} via Evolution API (CSV Row: ${data.csvRowNumber || 'N/A'}).`);
-
-    const endpoint = `${this.evolutionApiUrl}/message/sendText/${this.evolutionApiInstanceName}`;
-
-    // Normalize phone number
-    let normalizedNumber = data.phoneNumber;
-    if (normalizedNumber.startsWith('+')) {
-      normalizedNumber = normalizedNumber.substring(1);
-    }
-    if (!normalizedNumber.includes('@')) { // Check if JID suffix is missing
-      normalizedNumber = `${normalizedNumber}@s.whatsapp.net`;
-    }
-
+  private async sendMessage(phoneNumber: string, messageBody: string): Promise<boolean> {
+    this.logger.log(`Attempting to send message to ${phoneNumber}. Original Raw Body: [${messageBody}]`); 
+    
+    const fullPhoneNumber = `${phoneNumber}@s.whatsapp.net`;
+    this.logger.log(`Type of fullPhoneNumber before payload creation: ${typeof fullPhoneNumber}, value: ${fullPhoneNumber}`);
+    
     const payload = {
-      number: normalizedNumber, 
-      text: data.messageBody,
+      number: String(fullPhoneNumber), // Ensure phoneNumber is a string and includes @s.whatsapp.net
+      text: messageBody, // Send messageBody as is (should contain \n for newlines)
     };
+    this.logger.log(`Payload to be sent: ${JSON.stringify(payload)}`);
+
+    const endpoint = `${this.evolutionApiUrl}/message/sendText/${this.instanceName}`;
     const headers = {
       'Content-Type': 'application/json',
-      'apikey': this.evolutionApiKey,
+      'apikey': this.apiKey,
     };
 
     try {
-      const randomDelayValue = DelayUtil.getRandomDelayInRange(this.minDelayMs, this.maxDelayMs);
-      this.logger.log(`Waiting for ${randomDelayValue}ms before sending...`);
-      await DelayUtil.wait(randomDelayValue);
-
-      this.logger.log(`Sending message to ${normalizedNumber} with text: "${data.messageBody}"`); 
-      this.logger.debug(`POST to ${endpoint} with payload: ${JSON.stringify(payload)} and headers: ${JSON.stringify(headers)}`);
-
+      this.logger.debug(`Sending message to ${phoneNumber} via ${endpoint} with payload: ${JSON.stringify(payload)}`);
       const response = await axios.post(endpoint, payload, { headers });
-
-      this.logger.log(`Message sent successfully to ${normalizedNumber}. API Response status: ${response.status}`);
-      this.logger.debug(`API Response data: ${JSON.stringify(response.data)}`);
-
-      // Simulate success for now if needed, or handle actual API response
-      // For example, check response.data for success indicators from Evolution API
       if (response.status >= 200 && response.status < 300) {
-        // Consider the message successfully sent based on HTTP status
-        this.logger.log(`Message to ${normalizedNumber} considered successful by HTTP status.`);
-        return true; // Indicate success
+        this.logger.log(`Message sent successfully to ${phoneNumber}. Response: ${response.status}`);
+        return true;
       } else {
-        this.logger.warn(`Message to ${normalizedNumber} returned HTTP status ${response.status}. Response: ${JSON.stringify(response.data)}`);
-        return false; // Indicate failure
+        this.logger.warn(`API request to send message to ${phoneNumber} failed with status ${response.status}. Response: ${JSON.stringify(response.data)}`);
+        return false;
       }
-
     } catch (error) {
-      this.logger.error(`Failed to send message to ${data.phoneNumber}. Error: ${error}`);
+      this.logger.error(`Error sending message to ${phoneNumber} via Evolution API:`, error);
       if (axios.isAxiosError(error) && error.response) {
-        this.logger.error(`Axios error details: Status: ${error.response.status}, Data: ${JSON.stringify(error.response.data)}`);
+        this.logger.error(`API Error Response Data: ${JSON.stringify(error.response.data)}`);
       }
-      return false; // Indicate failure
+      return false;
     }
   }
 
-  public async processMessages(messages: MessageData[]): Promise<void> {
-    this.logger.log(`Starting to process ${messages.length} messages.`);
+  async processMessages(messages: Message[]): Promise<{ successCount: number; failureCount: number }> {
     let successCount = 0;
     let failureCount = 0;
 
-    for (let i = 0; i < messages.length; i++) {
-      const message = messages[i];
-      this.logger.log(`Processing message ${i + 1} of ${messages.length} to ${message.phoneNumber} (CSV Row: ${message.csvRowNumber || 'N/A'}).`);
+    this.logger.log(`Starting to process ${messages.length} messages for instance ${this.instanceName}.`);
+
+    for (const [index, message] of messages.entries()) {
+      this.logger.log(`Processing message ${index + 1}/${messages.length}: To ${message.phoneNumber}`);
       try {
-        const sentSuccessfully = await this.sendMessage(message);
-        if (sentSuccessfully) {
+        const success = await this.sendMessage(message.phoneNumber, message.messageBody);
+        if (success) {
+          this.logger.log(`Successfully sent message to ${message.phoneNumber}`);
           successCount++;
         } else {
           failureCount++;
-        }
-        
-        if (i < messages.length - 1) { // Don't delay after the last message
-          const delay = DelayUtil.getRandomDelayInRange(this.minDelayMs, this.maxDelayMs);
-          this.logger.log(`Waiting for ${delay}ms before next message...`);
-          await DelayUtil.wait(delay);
         }
       } catch (error) {
         // Error already logged in sendMessage
         failureCount++;
         // Optionally, add to a list of failed messages for retry or reporting
       }
+      if (index < messages.length - 1) {
+        const delay = DelayUtil.getRandomDelayInRange(this.minDelayMs, this.maxDelayMs);
+        this.logger.log(`Waiting for ${delay / 1000} seconds before next message...`);
+        await DelayUtil.wait(delay);
+      }
     }
-    this.logger.log('--------------------------------------------------');
-    this.logger.log('Message Processing Summary:');
-    this.logger.log(`Total messages: ${messages.length}`);
-    this.logger.log(`Successfully sent: ${successCount}`);
-    this.logger.log(`Failed to send: ${failureCount}`);
-    this.logger.log('--------------------------------------------------');
+    this.logger.log(`Finished processing all messages for instance ${this.instanceName}.`);
+    this.logger.log(`Summary for instance ${this.instanceName}: Successes = ${successCount}, Failures = ${failureCount}`);
+    return { successCount, failureCount };
   }
 }

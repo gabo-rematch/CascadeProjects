@@ -5,7 +5,7 @@ import { usePropertyData, useMatchCounts, useMatches } from '../hooks/useMatchin
 
 // Descriptions for different matching algorithms
 const ALGORITHM_DESCRIPTIONS = {
-  'v1': {
+  'exact': {
     title: 'Exact Match (v1)',
     criteria: [
       "Transaction Type: Listing and Requirement must have the same type (Sale/Rent).",
@@ -25,6 +25,13 @@ const ALGORITHM_DESCRIPTIONS = {
       "Property Type: Exact match preferred, similar types considered.",
       "(Note: This is a sample description - actual logic may vary)"
     ]
+  },
+  'custom': {
+    title: 'Custom Match',
+    criteria: [
+      "Configure matching rules for each field below.",
+      "Transaction Type: Always matched.",
+    ]
   }
   // Add more algorithms here if needed
 };
@@ -35,7 +42,23 @@ const MatchingPage = () => {
   const [selectedListingId, setSelectedListingId] = useState(''); // Initialize with empty string
   const [selectedRequirementId, setSelectedRequirementId] = useState(''); // Initialize with empty string
   const [transactionTypeFilter, setTransactionTypeFilter] = useState('all'); // 'all', 'sale', 'rent'
-  const [selectedAlgorithm, setSelectedAlgorithm] = useState('v1'); // State for algorithm
+  const [selectedAlgorithm, setSelectedAlgorithm] = useState('exact'); // State for algorithm
+
+  // State for custom criteria configuration
+  const [customCriteria, setCustomCriteria] = useState({
+    budget: 'strict', // 'strict' or 'flexible'
+    area: 'strict',
+    bedrooms: 'strict',
+    propertyType: 'strict',
+    community: 'strict',
+  });
+
+  // Handler to update custom criteria
+  const handleCustomCriteriaChange = (field, value) => {
+    setCustomCriteria(prev => ({ ...prev, [field]: value }));
+    // Note: We might need to trigger a re-fetch of counts/matches here
+    // if the custom algorithm is currently selected. Let's address this later.
+  };
 
   // Use the custom hook for listings and requirements
   const {
@@ -53,7 +76,7 @@ const MatchingPage = () => {
     requirementMatchCounts,
     isLoadingMatchCounts,
     errorMatchCounts
-  } = useMatchCounts(selectedAlgorithm, transactionTypeFilter);
+  } = useMatchCounts(selectedAlgorithm, transactionTypeFilter, customCriteria); // Pass customCriteria
 
   // Use the custom hook for matches
   const {
@@ -62,7 +85,7 @@ const MatchingPage = () => {
     errorMatches,
     fetchMatches, // Function to trigger match fetching
     clearMatches  // Function to clear matches state
-  } = useMatches(selectedAlgorithm, transactionTypeFilter);
+  } = useMatches(selectedAlgorithm, transactionTypeFilter, customCriteria); // Pass customCriteria
 
   // --- Effects --- 
 
@@ -177,6 +200,55 @@ const MatchingPage = () => {
               <li key={index}>{item}</li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {/* --- NEW: Custom Criteria Configuration Section --- */}
+      {selectedAlgorithm === 'custom' && (
+        <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 p-4 rounded-lg space-y-4 mb-6">
+           <h3 className="text-lg font-semibold mb-2">Configure Custom Matching Rules</h3>
+           <p className="text-sm mb-4">Define how each field should be matched. "Strict" requires an exact match and non-missing values. "Flexible" allows missing/null values on the requirement side.</p>
+
+           {/* Budget/Price */}
+           <div className="flex items-center justify-between">
+              <label className="font-medium">Budget / Price:</label>
+              <select value={customCriteria.budget} onChange={(e) => handleCustomCriteriaChange('budget', e.target.value)} className="p-1 border rounded">
+                 <option value="strict">Strict Range</option>
+                 <option value="flexible">Flexible (Allow Missing)</option>
+              </select>
+           </div>
+           {/* Area */}
+           <div className="flex items-center justify-between">
+              <label className="font-medium">Area (sqft):</label>
+              <select value={customCriteria.area} onChange={(e) => handleCustomCriteriaChange('area', e.target.value)} className="p-1 border rounded">
+                 <option value="strict">Strict Match</option>
+                 <option value="flexible">Flexible (Allow Missing)</option>
+              </select>
+           </div>
+           {/* Bedrooms */}
+           <div className="flex items-center justify-between">
+              <label className="font-medium">Bedrooms:</label>
+              <select value={customCriteria.bedrooms} onChange={(e) => handleCustomCriteriaChange('bedrooms', e.target.value)} className="p-1 border rounded">
+                 <option value="strict">Strict Match</option>
+                 <option value="flexible">Flexible (Allow Missing)</option>
+              </select>
+           </div>
+           {/* Property Type */}
+           <div className="flex items-center justify-between">
+              <label className="font-medium">Property Type:</label>
+              <select value={customCriteria.propertyType} onChange={(e) => handleCustomCriteriaChange('propertyType', e.target.value)} className="p-1 border rounded">
+                 <option value="strict">Strict Match</option>
+                 <option value="flexible">Flexible (Allow Missing)</option>
+              </select>
+           </div>
+           {/* Community */}
+           <div className="flex items-center justify-between">
+              <label className="font-medium">Community:</label>
+              <select value={customCriteria.community} onChange={(e) => handleCustomCriteriaChange('community', e.target.value)} className="p-1 border rounded">
+                 <option value="strict">Strict Match (In List)</option>
+                 <option value="flexible">Flexible (Allow Missing)</option>
+              </select>
+           </div>
         </div>
       )}
 

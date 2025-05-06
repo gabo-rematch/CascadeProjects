@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import { parse } from 'csv-parse';
-import { AppLogger } from './logger'; // We'll create this soon
+import { AppLogger } from './logger';
 
 export interface MessageData {
   phoneNumber: string;

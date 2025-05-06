@@ -28,7 +28,7 @@ const CardSection = ({ data, type }) => {
   if (!data) return null;
 
   // Common fields or defaults
-  const listingRef = data.listing_ref || 'N/A';
+  const listingRef = data.unit_ref_no || 'N/A';
 
   // Listing specific detailed view
   if (type === 'listing') {
